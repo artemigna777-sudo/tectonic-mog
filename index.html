@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Земля трясётся 🤲 67</title>
+  <meta name="description" content="Тест-игра про геологические ЧС: землетрясения, вулканы, оползни, сели и карст. 67 вопросов, комбо и пасхалки.">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🌋</text></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;800&family=Unbounded:wght@600;800&display=swap&subset=cyrillic" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="strata" aria-hidden="true"></div>
+
+  <header class="topbar">
+    <button id="logo" class="logo" type="button" aria-label="Логотип">🌋 <span>ЗТ67</span></button>
+    <div class="hud">
+      <span id="combo" class="combo" hidden>🔥 x2</span>
+      <span id="score" class="pill" hidden>0 очк.</span>
+      <button id="soundBtn" class="icon-btn" type="button" aria-pressed="true" aria-label="Звук">🔊</button>
+    </div>
+  </header>
+
+  <main id="app">
+    <!-- Старт -->
+    <section id="start" class="screen">
+      <h1 id="title" class="title">Земля трясётся <span class="nowrap">🤲 67</span></h1>
+      <p class="subtitle">Тест-игра про геологические ЧС: землетрясения, вулканы, оползни, сели и карст.</p>
+      <div class="seis-box">
+        <svg id="startSeis" class="seis" viewBox="0 0 600 120" preserveAspectRatio="none" aria-hidden="true">
+          <line x1="0" y1="60" x2="600" y2="60" class="seis-axis"/>
+          <path id="startPath" class="seis-line" d="M0 60 L600 60"/>
+        </svg>
+      </div>
+      <button id="playBtn" class="btn btn-big" type="button">Играть ▶</button>
+      <p id="best" class="best"></p>
+      <p class="hint">Клавиши 1–4 — ответ, Enter — дальше. Где-то спрятаны пасхалки 🥚</p>
+    </section>
+
+    <!-- Игра -->
+    <section id="game" class="screen" hidden>
+      <div class="progress">
+        <div class="progress-row">
+          <span id="counter">Вопрос 1 / 67</span>
+          <span id="streakInfo"></span>
+        </div>
+        <svg id="progSeis" class="seis seis-prog" viewBox="0 0 1000 80" preserveAspectRatio="none" aria-hidden="true">
+          <line x1="0" y1="40" x2="1000" y2="40" class="seis-axis"/>
+          <polyline id="progLine" class="seis-line" points="0,40"/>
+        </svg>
+      </div>
+
+      <article id="card" class="card">
+        <h2 id="question" class="question"></h2>
+        <div id="answers" class="answers" role="group" aria-label="Варианты ответа"></div>
+        <svg id="crack" class="crack" viewBox="0 0 400 300" preserveAspectRatio="none" aria-hidden="true">
+          <polyline id="crackLine" points=""/>
+        </svg>
+      </article>
+
+      <div id="feedback" class="feedback" hidden aria-live="polite">
+        <p id="reaction" class="reaction"></p>
+        <p id="fact" class="fact"></p>
+        <button id="nextBtn" class="btn" type="button">Дальше →</button>
+      </div>
+    </section>
+
+    <!-- Финал -->
+    <section id="final" class="screen" hidden>
+      <h2 class="title title-sm">Толчки стихли</h2>
+      <div class="card final-card">
+        <p class="final-score"><span id="fScore">0</span> очков</p>
+        <p id="fPct" class="final-pct"></p>
+        <p id="fRank" class="rank"></p>
+        <p id="fPhrase" class="phrase"></p>
+        <p id="fBest" class="best"></p>
+        <div id="tiger" class="tiger" hidden>🐯 <span>Вот такие дела, собачка</span></div>
+      </div>
+      <div class="row">
+        <button id="againBtn" class="btn" type="button">Ещё раз ↻</button>
+        <button id="shareBtn" class="btn btn-alt" type="button">Поделиться 📋</button>
+      </div>
+    </section>
+  </main>
+
+  <!-- Секретный код (для телефонов) -->
+  <button id="secretBtn" class="secret-btn" type="button" aria-label="Секретный код">🪨</button>
+  <dialog id="secretDlg" class="dlg">
+    <form id="secretForm" method="dialog">
+      <label for="secretInput">Секретный код</label>
+      <input id="secretInput" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="20">
+      <div class="row">
+        <button class="btn" type="submit">Ок</button>
+        <button id="secretClose" class="btn btn-alt" type="button">Закрыть</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="fx" class="fx" aria-hidden="true"></div>
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+
+  <script src="questions.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

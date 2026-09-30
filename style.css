@@ -1,0 +1,362 @@
+/* ===== Земля трясётся 🤲 67 ===== */
+:root {
+  --basalt: #2B2D42;
+  --lava: #FF5A36;
+  --magma: #FFC233;
+  --mineral: #2EC4B6;
+  --sand: #F4E9DC;
+
+  --bg: var(--sand);
+  --ink: var(--basalt);
+  --muted: #5d6078;
+  --card: #fffaf2;
+  --line: var(--basalt);
+  --shadow: var(--basalt);
+  --ok: #1fa36f;
+  --bad: var(--lava);
+  --layer1: #e7d6c1;
+  --layer2: #d6bd9f;
+  --layer3: #b99873;
+  --layer4: #8a6c52;
+
+  --r-stone: 26px 16px 30px 14px / 16px 28px 18px 24px;
+  --font-h: "Unbounded", "Arial Black", system-ui, sans-serif;
+  --font-t: "Manrope", system-ui, -apple-system, "Segoe UI", sans-serif;
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1c1d2c;
+    --ink: var(--sand);
+    --muted: #b3aca3;
+    --card: #2B2D42;
+    --line: #e9dccb;
+    --shadow: #0a0b12;
+    --ok: #34d399;
+    --layer1: #25273a;
+    --layer2: #2d2f45;
+    --layer3: #3a3242;
+    --layer4: #4a3537;
+  }
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  min-height: 100vh;
+  min-height: 100dvh;
+  background: var(--bg);
+  color: var(--ink);
+  font: 16px/1.5 var(--font-t);
+  overflow-x: hidden;
+}
+button { font: inherit; color: inherit; }
+[hidden] { display: none !important; }
+:focus-visible { outline: 4px solid var(--mineral); outline-offset: 3px; }
+
+/* Слои земли внизу */
+.strata {
+  position: fixed; inset: auto 0 0 0; height: 90px; z-index: -1; pointer-events: none;
+  background:
+    linear-gradient(to bottom,
+      var(--layer1) 0 25%, var(--layer2) 25% 50%, var(--layer3) 50% 75%, var(--layer4) 75% 100%);
+  clip-path: polygon(0 18%, 8% 10%, 17% 20%, 29% 8%, 41% 16%, 55% 6%, 68% 18%, 80% 9%, 91% 17%, 100% 7%, 100% 100%, 0 100%);
+  opacity: .9;
+}
+
+/* Шапка */
+.topbar {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  max-width: 760px; margin: 0 auto; padding: 12px 16px;
+}
+.logo {
+  font-family: var(--font-h); font-weight: 800; font-size: 18px;
+  background: var(--magma); color: var(--basalt);
+  border: 3px solid var(--line); border-radius: var(--r-stone);
+  box-shadow: 3px 3px 0 var(--shadow);
+  padding: 8px 14px; min-height: 48px; cursor: pointer;
+}
+.logo.flip { animation: salto .8s ease-in-out; }
+@keyframes salto { 50% { transform: translateY(-30px) rotate(180deg); } 100% { transform: rotate(360deg); } }
+.hud { display: flex; align-items: center; gap: 8px; }
+.pill, .combo {
+  font-weight: 800; padding: 6px 12px; border: 3px solid var(--line);
+  border-radius: 999px; box-shadow: 2px 2px 0 var(--shadow); background: var(--card);
+  white-space: nowrap;
+}
+.combo { background: var(--lava); color: #fff; }
+.combo.pop { animation: pop .35s ease-out; }
+@keyframes pop { 50% { transform: scale(1.35) rotate(-6deg); } }
+.icon-btn {
+  min-width: 48px; min-height: 48px; font-size: 20px; cursor: pointer;
+  background: var(--card); border: 3px solid var(--line); border-radius: 50%;
+  box-shadow: 2px 2px 0 var(--shadow);
+}
+
+/* Экраны */
+main { max-width: 760px; margin: 0 auto; padding: 8px 16px 120px; }
+.screen { animation: rise .4s ease-out; }
+@keyframes rise { from { opacity: 0; transform: translateY(14px); } }
+.title {
+  font-family: var(--font-h); font-weight: 800; line-height: 1.1;
+  font-size: clamp(32px, 9vw, 60px); margin: 16px 0 8px;
+  text-shadow: 3px 3px 0 var(--magma);
+}
+.title-sm { font-size: clamp(26px, 7vw, 40px); }
+.nowrap { white-space: nowrap; }
+.subtitle { font-size: 18px; color: var(--muted); margin: 0 0 16px; }
+.hint, .best { color: var(--muted); font-size: 14px; }
+.best { font-weight: 600; }
+.row { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 16px; }
+
+/* Кнопки */
+.btn {
+  min-height: 52px; padding: 12px 22px; cursor: pointer;
+  font-family: var(--font-h); font-weight: 600; font-size: 17px;
+  background: var(--lava); color: #fff;
+  border: 3px solid var(--line); border-radius: var(--r-stone);
+  box-shadow: 4px 4px 0 var(--shadow);
+  transition: transform .08s, box-shadow .08s;
+}
+.btn:hover { transform: translate(-1px, -1px); box-shadow: 5px 5px 0 var(--shadow); }
+.btn:active { transform: translate(3px, 3px); box-shadow: 1px 1px 0 var(--shadow); }
+.btn-big { font-size: 22px; padding: 16px 36px; margin-top: 18px; }
+.btn-alt { background: var(--mineral); color: var(--basalt); }
+
+/* Сейсмограммы */
+.seis-box {
+  background: var(--card); border: 3px solid var(--line); border-radius: var(--r-stone);
+  box-shadow: 4px 4px 0 var(--shadow); padding: 8px; overflow: hidden;
+  background-image: repeating-linear-gradient(90deg, transparent 0 29px, rgba(128,128,128,.15) 29px 30px);
+}
+.seis { display: block; width: 100%; height: 110px; }
+.seis-axis { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 4 6; opacity: .5; }
+.seis-line { fill: none; stroke: var(--lava); stroke-width: 3; stroke-linejoin: round; stroke-linecap: round; vector-effect: non-scaling-stroke; }
+.progress { margin-bottom: 14px; }
+.progress-row { display: flex; justify-content: space-between; font-weight: 800; font-size: 14px; margin-bottom: 4px; }
+.seis-prog {
+  height: 56px; background: var(--card); border: 3px solid var(--line);
+  border-radius: 14px 20px 12px 18px; box-shadow: 3px 3px 0 var(--shadow);
+}
+
+/* Карточка вопроса */
+.card {
+  position: relative; background: var(--card);
+  border: 3px solid var(--line); border-radius: var(--r-stone);
+  box-shadow: 6px 6px 0 var(--shadow); padding: 20px 16px;
+}
+.card.ok { animation: okflash .6s ease-out; }
+@keyframes okflash { 0% { box-shadow: 0 0 0 10px var(--ok), 6px 6px 0 var(--shadow); } }
+.question { font-family: var(--font-h); font-weight: 600; font-size: clamp(18px, 4.6vw, 23px); line-height: 1.3; margin: 0 0 16px; }
+.answers { display: grid; gap: 12px; }
+@media (min-width: 640px) { .answers { grid-template-columns: 1fr 1fr; } }
+.ans {
+  position: relative; display: flex; align-items: center; gap: 10px; text-align: left;
+  min-height: 56px; padding: 10px 14px; cursor: pointer; font-weight: 600; font-size: 16px;
+  background: var(--bg); border: 3px solid var(--line); border-radius: 18px 12px 20px 10px / 12px 18px 12px 18px;
+  box-shadow: 3px 3px 0 var(--shadow); transition: transform .08s, box-shadow .08s, background .2s;
+}
+.ans:hover:not(:disabled) { transform: translate(-1px, -1px); box-shadow: 4px 4px 0 var(--shadow); background: color-mix(in srgb, var(--magma) 30%, var(--bg)); }
+.ans:disabled { cursor: default; }
+.ans .key {
+  flex: none; display: grid; place-items: center; width: 30px; height: 30px;
+  font-family: var(--font-h); font-size: 14px; background: var(--magma); color: var(--basalt);
+  border: 2px solid var(--line); border-radius: 50%;
+}
+.ans.correct { background: var(--ok); color: #fff; }
+.ans.wrong { background: var(--lava); color: #fff; }
+.ans.dim { opacity: .55; }
+
+/* Трещина */
+.crack { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.crack polyline {
+  fill: none; stroke: var(--ink); stroke-width: 3; stroke-linejoin: bevel;
+  vector-effect: non-scaling-stroke; stroke-dasharray: 1400; stroke-dashoffset: 1400;
+}
+.crack.show polyline { animation: crack .5s ease-out forwards; }
+@keyframes crack { to { stroke-dashoffset: 0; } }
+
+/* Обратная связь */
+.feedback {
+  margin-top: 16px; padding: 16px; background: var(--card);
+  border: 3px dashed var(--line); border-radius: var(--r-stone); animation: rise .3s ease-out;
+}
+.reaction { font-family: var(--font-h); font-weight: 800; font-size: 20px; margin: 0 0 6px; }
+.reaction.good { color: var(--ok); }
+.reaction.bad { color: var(--lava); }
+.fact { margin: 0 0 12px; }
+
+/* Финал */
+.final-card { text-align: center; }
+.final-score { font-family: var(--font-h); font-weight: 800; font-size: clamp(36px, 10vw, 56px); margin: 0; }
+.final-pct { font-size: 18px; font-weight: 800; margin: 4px 0; }
+.rank {
+  display: inline-block; font-family: var(--font-h); font-weight: 800; font-size: clamp(18px, 5vw, 26px);
+  background: var(--magma); color: var(--basalt); padding: 8px 16px; margin: 8px 0;
+  border: 3px solid var(--line); border-radius: var(--r-stone); box-shadow: 4px 4px 0 var(--shadow);
+  transform: rotate(-2deg);
+}
+.phrase { font-size: 18px; }
+.tiger { font-size: 56px; margin-top: 8px; animation: rise .6s ease-out; }
+.tiger span { display: block; font-size: 16px; font-weight: 800; }
+
+/* Тряска экрана */
+.shake #app, .shake .topbar { animation: quake .12s linear infinite; }
+@keyframes quake {
+  0% { transform: translate(0, 0) rotate(0); }
+  25% { transform: translate(-6px, 3px) rotate(-.6deg); }
+  50% { transform: translate(5px, -4px) rotate(.5deg); }
+  75% { transform: translate(-4px, -2px) rotate(-.3deg); }
+  100% { transform: translate(0, 0) rotate(0); }
+}
+
+/* Частицы, тосты, оверлеи */
+.fx { position: fixed; inset: 0; pointer-events: none; overflow: hidden; z-index: 50; }
+.p { position: absolute; font-size: 28px; will-change: transform; }
+.p.burst { animation: burst var(--dur, 1s) ease-out forwards; }
+@keyframes burst {
+  to { transform: translate(var(--dx), var(--dy)) rotate(var(--rot)); opacity: 0; }
+}
+.p.fall { top: -60px; animation: fall var(--dur, 3s) linear forwards; }
+@keyframes fall { to { transform: translate(var(--dx, 0), 115vh) rotate(var(--rot, 360deg)); } }
+.p.fade { animation: fadeout 1.2s ease-out forwards; }
+@keyframes fadeout { from { opacity: 1; } to { opacity: 0; } }
+
+.toasts {
+  position: fixed; left: 50%; top: 76px; transform: translateX(-50%); z-index: 70;
+  display: grid; gap: 8px; width: min(92vw, 420px); pointer-events: none;
+}
+.toast {
+  background: var(--basalt); color: var(--sand); font-weight: 800; text-align: center;
+  padding: 12px 16px; border: 3px solid var(--magma); border-radius: var(--r-stone);
+  box-shadow: 4px 4px 0 var(--shadow); animation: toastIn .3s ease-out;
+}
+.toast.out { animation: fadeout .4s ease-in forwards; }
+@keyframes toastIn { from { opacity: 0; transform: translateY(-12px) scale(.9); } }
+
+.ovl {
+  position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; align-content: center; gap: 10px;
+  text-align: center; padding: 16px; pointer-events: none; animation: rise .25s ease-out;
+}
+.ovl.out { animation: fadeout .4s ease-in forwards; }
+.big-text {
+  font-family: var(--font-h); font-weight: 800; font-size: clamp(34px, 11vw, 88px); line-height: 1;
+  color: var(--magma); -webkit-text-stroke: 2px var(--basalt); text-shadow: 5px 5px 0 var(--basalt);
+}
+.mid-text {
+  font-family: var(--font-h); font-weight: 800; font-size: clamp(18px, 5vw, 30px);
+  background: var(--lava); color: #fff; padding: 6px 14px; border: 3px solid var(--basalt);
+  border-radius: var(--r-stone); box-shadow: 4px 4px 0 var(--basalt);
+}
+
+/* 67: руки */
+.hands { display: flex; gap: 20vw; font-size: clamp(64px, 20vw, 140px); }
+.hands span { animation: sixseven .35s ease-in-out infinite alternate; }
+.hands span:last-child { animation-delay: .175s; }
+@keyframes sixseven { from { transform: translateY(-30px); } to { transform: translateY(30px); } }
+
+/* MOG: вулкан */
+.volcano { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); font-size: 96px; z-index: 61; }
+
+/* Вась */
+.vas {
+  position: fixed; right: -260px; top: 42%; z-index: 62; display: flex; align-items: center; gap: 8px;
+  background: var(--card); border: 3px solid var(--line); border-right: 0;
+  border-radius: 30px 0 0 30px; box-shadow: -4px 4px 0 var(--shadow);
+  padding: 10px 16px; font-weight: 800; transition: right .45s cubic-bezier(.2,1.4,.5,1);
+}
+.vas.in { right: 0; }
+.vas b { font-size: 40px; }
+
+/* Пингвин-нигилист и котость */
+.walker { position: fixed; bottom: 14px; left: -80px; z-index: 55; pointer-events: none; font-size: 44px; }
+.walker.peng { animation: walk 14s linear forwards; }
+.walker.cat { bottom: 45%; animation: walk 3.5s linear forwards; font-size: 50px; }
+@keyframes walk { to { transform: translateX(calc(100vw + 160px)); } }
+.walker small {
+  position: absolute; bottom: 100%; left: 0; width: 230px; font: 700 13px/1.3 var(--font-t);
+  background: var(--card); color: var(--ink); border: 2px solid var(--line); border-radius: 12px; padding: 6px 8px;
+}
+.mountain { position: fixed; right: 10px; bottom: 12px; font-size: 64px; z-index: 54; pointer-events: none; animation: rise .6s; }
+.paw { position: fixed; z-index: 54; font-size: 22px; pointer-events: none; animation: fadeout 3s ease-in forwards; }
+
+/* Тир-лист */
+.tier {
+  pointer-events: auto; background: var(--card); color: var(--ink); width: min(92vw, 420px);
+  border: 3px solid var(--line); border-radius: var(--r-stone); box-shadow: 6px 6px 0 var(--shadow); padding: 16px;
+}
+.tier h3 { font-family: var(--font-h); margin: 0 0 10px; }
+.tier ol { list-style: none; margin: 0 0 12px; padding: 0; display: grid; gap: 4px; text-align: left; }
+.tier li { padding: 6px 10px; border-radius: 10px; font-weight: 600; font-size: 14px; }
+.tier li.me { background: var(--magma); color: var(--basalt); font-weight: 800; }
+.tier li.me::after { content: "  ⬅ ты здесь"; }
+
+/* Секретная кнопка и диалог */
+.secret-btn {
+  position: fixed; right: 8px; bottom: 8px; z-index: 40; width: 48px; height: 48px;
+  font-size: 22px; background: transparent; border: 0; opacity: .35; cursor: pointer;
+}
+.secret-btn:hover, .secret-btn:focus-visible { opacity: 1; }
+.dlg {
+  background: var(--card); color: var(--ink); border: 3px solid var(--line);
+  border-radius: var(--r-stone); box-shadow: 6px 6px 0 var(--shadow); padding: 20px; width: min(92vw, 360px);
+}
+.dlg::backdrop { background: rgba(20, 20, 30, .55); }
+.dlg label { display: block; font-family: var(--font-h); font-weight: 600; margin-bottom: 8px; }
+.dlg input {
+  width: 100%; min-height: 48px; font: 700 18px var(--font-t); padding: 8px 12px;
+  background: var(--bg); color: var(--ink); border: 3px solid var(--line); border-radius: 12px;
+}
+
+/* ===== Режимы-пасхалки ===== */
+
+/* LARP */
+body.larp .ans::after { content: "🎭"; margin-left: auto; font-size: 20px; }
+body.larp .btn::before { content: "🎭 "; }
+
+/* Гигачад */
+body.chad #app, body.chad .topbar, body.chad .strata { filter: grayscale(1) contrast(1.25); }
+body.chad .ans { flex-wrap: wrap; }
+body.chad .ans .txt::after {
+  content: "доверяй"; display: block; font-size: 11px; letter-spacing: .1em; text-transform: uppercase; opacity: .7;
+}
+.moai { position: fixed; left: 8px; bottom: 60px; font-size: 110px; z-index: 5; pointer-events: none; filter: grayscale(1); animation: rise .5s; }
+
+/* Мой 2016 */
+body.retro {
+  --bg: #1a0033; --card: #00ffcc; --ink: #1a0033; --line: #ff00ff; --shadow: #ffff00;
+  --lava: #ff00ff; --magma: #ffff00; --mineral: #00ff00; --muted: #330066;
+  --font-h: "Comic Sans MS", "Comic Sans", "Chalkboard SE", cursive;
+  --font-t: "Comic Sans MS", "Comic Sans", "Chalkboard SE", cursive;
+  background: repeating-linear-gradient(45deg, #1a0033 0 20px, #2a0055 20px 40px);
+}
+body.retro .subtitle, body.retro .hint, body.retro .best, body.retro .progress-row { color: #00ffcc; }
+body.retro .title { color: #ffff00; text-shadow: 3px 3px 0 #ff00ff, -3px -3px 0 #00ffff; }
+body.retro::after {
+  content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 80; opacity: .22; mix-blend-mode: overlay;
+  background:
+    repeating-radial-gradient(circle at 17% 32%, #fff 0 1px, transparent 1px 3px),
+    repeating-radial-gradient(circle at 73% 61%, #000 0 1px, transparent 1px 4px);
+  animation: grain .25s steps(2) infinite;
+}
+@keyframes grain { 50% { transform: translate(-2px, 3px); } }
+
+/* Воздухан */
+body.air .card, body.air .btn, body.air .ans, body.air .seis-box, body.air .feedback { animation: hover 3s ease-in-out infinite; }
+body.air .ans:nth-child(2n) { animation-delay: -1.2s; }
+body.air .ans:nth-child(3n) { animation-delay: -2.1s; }
+@keyframes hover { 50% { transform: translateY(-10px); } }
+
+/* ===== Меньше движения ===== */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition-duration: .01ms !important; }
+  .shake #app, .shake .topbar { animation: fadepulse .5s ease-in-out 2; }
+  @keyframes fadepulse { 50% { opacity: .55; } }
+  .p.burst, .p.fall { animation: fadeout 1.2s ease-out forwards; }
+  .p.fall { top: auto; }
+  .hands span, .walker, .logo.flip, body.air .card, body.air .btn, body.air .ans,
+  body.air .seis-box, body.air .feedback, body.retro::after, .combo.pop, .card.ok { animation: none; }
+  .walker { left: 40%; animation: fadeout 4s ease-in forwards; }
+  .vas { transition: none; }
+}
