@@ -3,6 +3,7 @@
 from html import escape
 
 from .analyze import Report
+from .gemini import model_name
 
 CONF = {"high": "высокая", "medium": "средняя", "low": "низкая"}
 
@@ -56,9 +57,10 @@ def summary(rep: Report) -> str:
 
     g = rep.gemini
     if g:
-        out.append(f"\n🤖 <b>Gemini</b> (уверенность {CONF.get(g.get('confidence'), '?')}):")
+        who = model_name(g.get("model"))
+        out.append(f"\n🤖 <b>{escape(who)}</b> (уверенность {CONF.get(g.get('confidence'), '?')}):")
         if g.get("confidence_claimed"):
-            out.append(f"  ↳ Gemini считал уверенность {CONF.get(g['confidence_claimed'])}, но ни текст на фото, "
+            out.append(f"  ↳ {escape(who)} считал уверенность {CONF.get(g['confidence_claimed'])}, но ни текст на фото, "
                        "ни поиск по картинке этого не подтверждают — поэтому точный адрес не ставлю.")
         for i, c in enumerate(g.get("candidates") or [], 1):
             where = ", ".join(x for x in (c.get("place"), c.get("city"), c.get("region"), c.get("country")) if x)
@@ -103,9 +105,10 @@ def dossier(rep: Report) -> str:
             lines.append("- Яндекс: похоже на " + ", ".join(rep.yandex.tags[:5]))
         for site in rep.yandex.sites[:5]:
             lines.append(f"- страница с этим фото: {site['title']}")
+    who = model_name((rep.gemini or {}).get("model"))
     for c in (rep.gemini or {}).get("candidates") or []:
         where = ", ".join(x for x in (c.get("place"), c.get("city"), c.get("region"), c.get("country")) if x)
-        lines.append(f"- вариант Gemini: {where} ({c.get('probability', 0):g}%)")
+        lines.append(f"- вариант {who}: {where} ({c.get('probability', 0):g}%)")
     if rep.best:
         lines.append(f"- предварительно: {rep.best.label} ({rep.best.lat:.4f}, {rep.best.lon:.4f}), "
                      f"уверенность {CONF.get(rep.best.confidence)}")

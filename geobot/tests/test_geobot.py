@@ -678,3 +678,43 @@ def test_stats_are_per_user(tmp_path):
     h.add("2:1", {"chat": 2, "best": {"lat": 55.79, "lon": 49.12, "label": "Казань"}, "candidates": []})
     h.set_truth("1:1", 55.79, 49.12, "Казань")
     assert h.stats(1)["answered"] == 1 and h.stats(2)["answered"] == 0 and h.stats()["answered"] == 1
+
+
+class FallbackHTTP(FakeHTTP):
+    """Gemini models by name, plus the OpenAI-compatible fallback under the key "fallback"."""
+
+    def post(self, url, json=None, headers=None, timeout=None):
+        if "/models/" in url:
+            return super().post(url, json, headers, timeout)
+        self.calls.append(("fallback", json["model"]))
+        self.prompts.append(json["messages"][0]["content"])
+        return FakeResp(*self.script["fallback"].pop(0))
+
+
+def test_fallback_model_answers_when_gemini_quota_is_out():
+    answer = '{"candidates": [{"region": "Татарстан", "country": "Россия", "probability": 70}], "confidence": "low"}'
+    http = FallbackHTTP({
+        "m1": [(429, {"error": {"message": "quota", "details": [{"violations": [{"quotaId": "PerDay"}]}]}})],
+        "fallback": [(200, {"choices": [{"message": {"content": "Вот ответ:\n" + answer}}]}),
+                     (429, {"error": {"code": 429, "message": "Rate limit exceeded: free-models-per-day"}})],
+    })
+    gem = Gemini(http, "k", ["m1"], ["lite"], fallback_key="sk-or-x", fallback_model="moonshotai/kimi-k2.6:free")
+    g = asyncio.run(gem.analyze(plain_jpeg(), [("знак", plain_jpeg())], "нет"))
+    assert g["region"] == "Татарстан" and g["model"] == "moonshotai/kimi-k2.6:free"
+    content = http.prompts[-1]
+    assert content[0]["type"] == "text" and content[1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+    assert sum(1 for c in content if c["type"] == "image_url") == 2
+    rep = Report(meta=read_meta(plain_jpeg()), compressed=True, gemini=g)
+    assert "<b>kimi-k2.6</b>" in summary(rep) and "вариант kimi-k2.6" in dossier(rep)
+
+    assert asyncio.run(gem.analyze(plain_jpeg(), [], "нет")) is None  # daily limit of the free model
+    assert "дневной лимит" in gem.last_error and gem.blocked["moonshotai/kimi-k2.6:free"] > time.time() + 60
+    assert asyncio.run(gem.locate_details(plain_jpeg())) == []  # boxes never go to the fallback
+    assert ("fallback", "moonshotai/kimi-k2.6:free") in http.calls and http.calls.count(("fallback", "moonshotai/kimi-k2.6:free")) == 2
+
+
+def test_fallback_alone_without_gemini_key():
+    http = FallbackHTTP({"fallback": [(200, {"choices": [{"message": {"content": '{"candidates": [], "confidence": "low"}'}}]})]})
+    gem = Gemini(http, "", [], [], fallback_key="sk-or-x")
+    assert asyncio.run(gem.analyze(plain_jpeg(), [], "нет"))["model"] == "moonshotai/kimi-k2.6:free"
+    assert Config(bot_token="1:x", fallback_key="k").gemini_enabled

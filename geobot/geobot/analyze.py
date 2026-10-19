@@ -193,14 +193,14 @@ async def analyze(data: bytes, compressed: bool, svc: Services, gemini: Gemini |
         rep.notes.append("Не удалось загрузить фото в поиск по картинке.")
 
     if gemini:
-        await say("🤖 Gemini рассматривает фото и детали…")
+        await say("🤖 ИИ рассматривает фото и детали…")
         g = await gemini.analyze(jpeg, crops, _hints(meta, rep.ocr_text, rep.clues, rep.yandex, prior))
         if g:
             rep.gemini = g
             if g.get("confidence") in ("high", "medium") and not _gemini_supported(rep, g):
                 g["confidence_claimed"], g["confidence"] = g["confidence"], "low"
         else:
-            rep.notes.append(f"Gemini: {gemini.last_error or 'не ответил'}.")
+            rep.notes.append(f"ИИ: {gemini.last_error or 'не ответил'}.")
 
     await say("🗺 Проверяю место по карте…")
     rep.best = await _pick_best(rep, svc)

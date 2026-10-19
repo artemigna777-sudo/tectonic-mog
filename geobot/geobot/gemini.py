@@ -6,6 +6,8 @@ Only used when GEMINI_API_KEY is set. Two steps per photo:
    of regional clues and everything the bot found, and returns observations and five
    candidate places with probabilities.
 Free-tier quotas are per model, so when one model runs out the next one in the list is used.
+When every Gemini model is out, the final analysis can go to a fallback model behind an
+OpenAI-compatible API (by default a free vision model on OpenRouter).
 """
 
 import base64
@@ -13,6 +15,7 @@ import json
 import logging
 import re
 import time
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -22,6 +25,8 @@ from .knowledge import cheat_sheet
 
 log = logging.getLogger(__name__)
 ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+FALLBACK_URL = "https://openrouter.ai/api/v1/chat/completions"
+FALLBACK_MODEL = "moonshotai/kimi-k2.6:free"
 META = (Path(__file__).parent / "data" / "meta_ru.md").read_text(encoding="utf-8") + cheat_sheet()
 
 LOCATE_PROMPT = """Найди на фото до 4 небольших участков с деталями, полезными для определения места съёмки:
@@ -97,10 +102,37 @@ def _image(jpeg: bytes) -> dict:
     return {"inline_data": {"mime_type": "image/jpeg", "data": base64.b64encode(jpeg).decode()}}
 
 
+def _openai_content(parts: list[dict]) -> list[dict]:
+    """Gemini parts -> OpenAI chat content (text and data-URL images)."""
+    out = []
+    for p in parts:
+        if "text" in p:
+            out.append({"type": "text", "text": p["text"]})
+        else:
+            img = p["inline_data"]
+            out.append({"type": "image_url", "image_url": {"url": f"data:{img['mime_type']};base64,{img['data']}"}})
+    return out
+
+
+def _next_utc_midnight() -> float:
+    now = datetime.now(timezone.utc)
+    return time.time() + ((now + timedelta(days=1)).replace(hour=0, minute=5, second=0, microsecond=0) - now).total_seconds()
+
+
+def model_name(model: str | None) -> str:
+    """Short name for the reply: "Gemini" or e.g. "kimi-k2.6"."""
+    if not model or model.startswith("gemini"):
+        return "Gemini"
+    return model.split("/")[-1].removesuffix(":free")
+
+
 class Gemini:
     def __init__(self, session: aiohttp.ClientSession, api_key: str, models: list[str], lite_models: list[str],
-                 search: bool = False):
+                 search: bool = False, fallback_key: str = "", fallback_model: str = FALLBACK_MODEL,
+                 fallback_url: str = FALLBACK_URL):
         self.http = session
+        self.fallback_key, self.fallback_model, self.fallback_url = fallback_key, fallback_model, fallback_url
+        self.used: Counter = Counter()  # answers per model since start, for /admin
         self.key = api_key
         self.models = models
         self.lite_models = lite_models
@@ -124,13 +156,13 @@ class Gemini:
 
     async def generate(self, parts: list[dict], lite: bool = False, search: bool = False) -> tuple[object, dict]:
         """Returns (parsed JSON or None, info {model, sources}). Walks the model list on quota errors."""
-        chain = self._available(self.lite_models if lite else self.models)
+        chain = self._available(self.lite_models if lite else self.models) if self.key else []
         if lite:  # if every Lite model is out, the bigger ones can do the small job too
             chain += [m for m in self._available(self.models) if m not in chain]
         plain = [{"text": p["text"].replace(SEARCH_RULE, "")} if "text" in p else p for p in parts]
         errors: list[str] = []
-        if not chain:
-            self.last_error = "у всех моделей закончился дневной лимит или они недоступны"
+        if not chain and self.key:
+            self.last_error = "у всех моделей Gemini закончился дневной лимит или они недоступны"
         for model in chain:
             for attempt_search in ([True, False] if search and self.search_ok else [False]):
                 try:
@@ -151,6 +183,7 @@ class Gemini:
                     sources = [{"title": c["web"].get("title", ""), "uri": c["web"].get("uri", "")}
                                for c in (cand.get("groundingMetadata") or {}).get("groundingChunks", []) if c.get("web")]
                     if parsed is not None:
+                        self.used[model] += 1
                         return parsed, {"model": model, "sources": sources[:5]}
                     if attempt_search:
                         continue  # retry the same model without search
@@ -178,9 +211,49 @@ class Gemini:
                     errors.append(f"{model} — HTTP {status}: {msg[:100]}")
                 log.warning("gemini %s HTTP %s: %s", model, status, msg[:300])
                 break
+        # the fallback only does the final analysis: its free quota is small, and boxes are a Gemini format
+        if not lite and self.fallback_key and self.blocked.get(self.fallback_model, 0) <= time.time():
+            parsed, err = await self._fallback(plain)
+            if parsed is not None:
+                self.used[self.fallback_model] += 1
+                return parsed, {"model": self.fallback_model, "sources": []}
+            errors.append(f"{self.fallback_model} — {err}")
         if errors:
             self.last_error = "; ".join(errors)
         return None, {}
+
+    async def _fallback(self, parts: list[dict]) -> tuple[object, str]:
+        body = {"model": self.fallback_model, "temperature": 0.2,
+                "messages": [{"role": "user", "content": _openai_content(parts)}]}
+        headers = {"Authorization": f"Bearer {self.fallback_key}", "X-Title": "geobot"}
+        try:
+            async with self.http.post(self.fallback_url, json=body, headers=headers,
+                                      timeout=aiohttp.ClientTimeout(total=180)) as r:
+                status, data = r.status, await r.json(content_type=None)
+        except Exception as e:
+            log.warning("fallback %s failed: %s", self.fallback_model, e)
+            return None, "нет связи"
+        err = (data.get("error") or {}) if isinstance(data, dict) else {}
+        if status == 200 and not err:
+            try:
+                parsed = parse_json(data["choices"][0]["message"]["content"] or "")
+            except (KeyError, IndexError, TypeError, ValueError) as e:
+                log.warning("fallback %s bad response: %s", self.fallback_model, e)
+                parsed = None
+            return parsed, "непонятный ответ"
+        msg = str(err.get("message", "") if isinstance(err, dict) else err)
+        code = err.get("code", status) if isinstance(err, dict) else status
+        log.warning("fallback %s HTTP %s: %s", self.fallback_model, code, msg[:300])
+        if code == 429 or status == 429:
+            daily = "per-day" in msg.lower() or "per day" in msg.lower()
+            self.blocked[self.fallback_model] = _next_utc_midnight() if daily else time.time() + 65
+            return None, "дневной лимит" if daily else "лимит запросов, модель перегружена"
+        if status in (401, 403):
+            return None, "ключ не подходит"
+        if status == 404:
+            self.blocked[self.fallback_model] = time.time() + 24 * 3600
+            return None, "модель не найдена — проверьте FALLBACK_MODEL"
+        return None, f"HTTP {status}: {msg[:100]}"
 
     async def locate_details(self, jpeg: bytes) -> list[dict]:
         boxes, _ = await self.generate([{"text": LOCATE_PROMPT}, _image(jpeg)], lite=True)

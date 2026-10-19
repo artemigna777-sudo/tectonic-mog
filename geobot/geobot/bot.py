@@ -52,7 +52,8 @@ class GeoBot:
         self.tg = tg or Telegram(http, cfg.bot_token)
         self.svc = svc or Services(http, cfg.contact, cfg.ocr_space_key, cfg.ocr_language)
         self.gemini = gemini if gemini is not None else (
-            Gemini(http, cfg.gemini_api_key, cfg.gemini_models, cfg.gemini_lite_models, cfg.gemini_search)
+            Gemini(http, cfg.gemini_api_key, cfg.gemini_models, cfg.gemini_lite_models, cfg.gemini_search,
+                   cfg.fallback_key, cfg.fallback_model, cfg.fallback_url)
             if cfg.gemini_enabled else None)
         self.history = history or History(cfg.history_file)
         self.users = users or Users(cfg.users_file)
@@ -79,9 +80,10 @@ class GeoBot:
         await self.tg.call("deleteWebhook", drop_pending_updates=True)
         await self.ensure_gazetteer()
         who = "everyone" if self.cfg.public else sorted(self.cfg.allowed_users | self.cfg.admins) or "nobody"
-        log.info("bot started; allowed users: %s; admins: %s; daily limit: %s; gemini: %s", who,
+        log.info("bot started; allowed users: %s; admins: %s; daily limit: %s; gemini: %s; fallback: %s", who,
                  sorted(self.cfg.admins) or "none", self.cfg.daily_limit or "off",
-                 ", ".join(self.cfg.gemini_models) if self.gemini else "off")
+                 ", ".join(self.cfg.gemini_models) if self.cfg.gemini_api_key else "off",
+                 self.cfg.fallback_model if self.cfg.fallback_key else "off")
         if self.cfg.public and not self.cfg.admins:
             log.warning("public mode without ADMIN_USERS: nobody can /ban, and your own photos count against the limit")
         offset = 0
@@ -175,8 +177,11 @@ class GeoBot:
         if acc["answered"]:
             lines.append(f"\n📊 Точность по всем пользователям: {acc['answered']} ответов"
                          + (f", медианная ошибка {_fmt_km(acc['median_km'])}" if acc["median_km"] is not None else ""))
+        used = getattr(self.gemini, "used", None)
+        if used:
+            lines.append("\n🤖 Ответы ИИ с запуска: " + ", ".join(f"{escape(m)} — {n}" for m, n in used.most_common()))
         if self.gemini and getattr(self.gemini, "last_error", ""):
-            lines.append("\n⚠️ Gemini: " + escape(str(self.gemini.last_error)[:300]))
+            lines.append("⚠️ Последняя ошибка ИИ: " + escape(str(self.gemini.last_error)[:300]))
         return "\n".join(lines)
 
     async def process(self, msg: dict, file_id: str, size: int | None, compressed: bool) -> None:

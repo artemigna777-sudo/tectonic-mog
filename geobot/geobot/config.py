@@ -48,6 +48,9 @@ class Config:
     gemini_models: list[str] = field(default_factory=lambda: _list(DEFAULT_MODELS))
     gemini_lite_models: list[str] = field(default_factory=lambda: _list(DEFAULT_LITE_MODELS))
     gemini_search: bool = False  # Search grounding is not in the free tier for Gemini 3 models
+    fallback_key: str = ""  # OpenAI-compatible API used when Gemini's daily quota is out (OpenRouter by default)
+    fallback_model: str = "moonshotai/kimi-k2.6:free"
+    fallback_url: str = "https://openrouter.ai/api/v1/chat/completions"
     contact: str = "geobot"
     history_file: str = "geobot_history.json"
     history_hint: bool = True  # tell Gemini where this user's earlier photos turned out to be
@@ -62,7 +65,7 @@ class Config:
 
     @property
     def gemini_enabled(self) -> bool:
-        return bool(self.gemini_api_key)
+        return bool(self.gemini_api_key or self.fallback_key)
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -88,6 +91,9 @@ class Config:
                                 (os.environ.get("GEMINI_MODELS", "").strip() or DEFAULT_MODELS)),
             gemini_lite_models=_list(os.environ.get("GEMINI_LITE_MODELS", "").strip() or DEFAULT_LITE_MODELS),
             gemini_search=os.environ.get("GEMINI_SEARCH", "0").strip().lower() in ("1", "yes", "on", "true"),
+            fallback_key=os.environ.get("FALLBACK_KEY", "").strip(),
+            fallback_model=os.environ.get("FALLBACK_MODEL", "").strip() or "moonshotai/kimi-k2.6:free",
+            fallback_url=os.environ.get("FALLBACK_URL", "").strip() or "https://openrouter.ai/api/v1/chat/completions",
             contact=os.environ.get("CONTACT", "geobot").strip() or "geobot",
             history_file=os.environ.get("HISTORY_FILE", "").strip() or "geobot_history.json",
             history_hint=os.environ.get("HISTORY_HINT", "1").strip().lower() not in ("0", "no", "off", "false"),
