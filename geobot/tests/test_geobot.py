@@ -7,8 +7,8 @@ from geobot.analyze import Report, _country_code, _pick_best, analyze
 from geobot.config import Config
 from geobot.exif import read_meta
 from geobot.report import dossier, summary
-from geobot.services import search_links
-from geobot.textclues import find_clues, geocode_queries
+from geobot.services import YandexResult, parse_yandex, search_links
+from geobot.textclues import find_clues, geocode_queries, place_phrases
 
 
 def jpeg_with_gps(lat=(55, 47, 30.0), lon=(49, 7, 12.0), direction=270.0) -> bytes:
@@ -74,11 +74,44 @@ def test_search_links_encode_url():
     links = search_links("https://litter.catbox.moe/abc.jpg")
     assert "url=https%3A%2F%2Flitter.catbox.moe%2Fabc.jpg" in links["Яндекс"]
     assert set(links) == {"Яндекс", "Google Lens", "Bing"}
+    links = search_links("https://avatars.mds.yandex.net/x/orig", "https://yandex.ru/images/search?cbir_id=1")
+    assert links["Яндекс"].endswith("cbir_id=1") and "avatars.mds.yandex.net" in links["Google Lens"]
+    assert search_links(None) == {}
+
+
+YANDEX_PAGE = """<div data-state="{&quot;initialState&quot;:{&quot;cbirTags&quot;:{&quot;tags&quot;:[{&quot;text&quot;:&quot;церковь казанской иконы&quot;}]},
+&quot;cbirSites&quot;:{&quot;sites&quot;:[
+{&quot;title&quot;:&quot;Церковь Казанской иконы Божией Матери, Старое Чурилино (Арский район), фотография&quot;,&quot;description&quot;:&quot;Республика Татарстан, Арский район, Старое Чурилино&quot;,&quot;url&quot;:&quot;https://sobory.ru/photo/1&quot;},
+{&quot;title&quot;:&quot;Старое Чурилино, Церковь Казанской иконы Божией Матери&quot;,&quot;description&quot;:&quot;&quot;,&quot;url&quot;:&quot;https://sobory.ru/article/2&quot;},
+{&quot;title&quot;:&quot;Category:Church of the Theotokos of Kazan (Staroye Churilino) - Wikimedia Commons&quot;,&quot;description&quot;:&quot;&quot;,&quot;url&quot;:&quot;https://commons.wikimedia.org/wiki/x&quot;},
+{&quot;title&quot;:&quot;Храм в селе Старое Чурилино — Новости&quot;,&quot;description&quot;:&quot;&quot;,&quot;url&quot;:&quot;https://tatmitropolia.ru/n/3&quot;}]}}}"></div>"""
+
+
+def test_parse_yandex_and_place_phrases():
+    r = YandexResult(page_url="p")
+    parse_yandex(YANDEX_PAGE, r)
+    assert r.tags == ["церковь казанской иконы"] and len(r.sites) == 4
+    phrases = place_phrases(r.sites)
+    # sobory.ru twice counts once; the Latin «Staroye Churilino» on Commons counts as the same name
+    assert phrases[0] == ("Старое Чурилино", 3, 3)
+    assert all(p[0] not in ("Казанской", "Новости", "Божией Матери") for p in phrases)
+
+
+def test_one_listing_copied_across_yandex_domains_counts_once():
+    sites = [{"title": "Ах, Катя! - 30 отзывов", "url": f"https://yandex.{tld}/maps/user/1"} for tld in ("ru", "com", "kz")]
+    assert place_phrases(sites) == [("Катя", 1, 3)]
+
+
+def test_lookalike_houses_are_not_an_answer():
+    page = YANDEX_PAGE.replace("церковь казанской иконы", "коттедж")
+    svc = FakeSvc(ya_page=page, geo={"Старое Чурилино": (56.0272, 49.7291, "Старое Чурилино, Арский район, Татарстан")})
+    rep = asyncio.run(analyze(plain_jpeg(), True, CFG, None, svc))
+    assert rep.best is None and any("похожие" in n for n in rep.notes)
 
 
 class FakeSvc:
-    def __init__(self, ocr_text="", geo=None):
-        self.ocr_text, self.geo, self.queries = ocr_text, geo or {}, []
+    def __init__(self, ocr_text="", geo=None, ya_page=""):
+        self.ocr_text, self.geo, self.queries, self.ya_page = ocr_text, geo or {}, [], ya_page
 
     async def ocr(self, jpeg):
         return self.ocr_text
@@ -86,10 +119,20 @@ class FakeSvc:
     async def temp_upload(self, jpeg):
         return "https://litter.catbox.moe/x.jpg"
 
+    async def yandex(self, jpeg):
+        if not self.ya_page:
+            return None
+        r = YandexResult(page_url="https://yandex.ru/images/search?cbir_id=1", image_url="https://avatars.mds.yandex.net/o")
+        parse_yandex(self.ya_page, r)
+        return r
+
     async def geocode(self, q, cc=""):
         self.queries.append((q, cc))
         hit = self.geo.get(q)
-        return [{"lat": str(hit[0]), "lon": str(hit[1]), "display_name": q}] if hit else []
+        if not hit:
+            return []
+        name = hit[2] if len(hit) > 2 else q
+        return [{"lat": str(hit[0]), "lon": str(hit[1]), "display_name": name}]
 
     async def reverse(self, lat, lon):
         return "где-то рядом"
@@ -190,3 +233,22 @@ def test_street_is_searched_inside_city_from_phone_code():
     rep = asyncio.run(analyze(plain_jpeg(), True, CFG, None, svc))
     assert rep.best.label == "ул. Баумана, 19, Казань" and rep.best.confidence == "medium"
     assert svc.queries[0] == ("ул. Баумана, 19, Казань", "ru")
+
+
+def test_yandex_matches_pin_the_place_and_object():
+    svc = FakeSvc(ya_page=YANDEX_PAGE, geo={"Старое Чурилино": (56.0272, 49.7291, "Старое Чурилино, Арский район, Татарстан, Россия"),
+                                             "церковь казанской иконы, Старое Чурилино": (56.0281, 49.7302)})
+    rep = asyncio.run(analyze(plain_jpeg(), True, CFG, None, svc))
+    assert rep.best.confidence == "high" and rep.best.radius_km == 0.2
+    assert (rep.best.lat, rep.best.lon) == (56.0281, 49.7302)
+    assert "Яндекс" in rep.links and rep.links["Яндекс"].endswith("cbir_id=1")
+    text = summary(rep)
+    assert "Яндекс нашёл" in text and "Старое Чурилино" in text
+
+
+def test_yandex_name_without_matching_region_is_ignored():
+    page = YANDEX_PAGE.replace("Старое Чурилино", "Ах Катя").replace("Арский район", "Ярославский район") \
+                      .replace("Республика Татарстан", "Ярославская область")
+    svc = FakeSvc(ya_page=page, geo={"Ах Катя": (61.8, 30.7, "Катя, Сортавальский округ, Карелия, Россия")})
+    rep = asyncio.run(analyze(plain_jpeg(), True, CFG, None, svc))
+    assert rep.best is None

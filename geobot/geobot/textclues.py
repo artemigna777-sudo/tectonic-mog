@@ -168,3 +168,90 @@ def geocode_queries(text: str, limit: int = 4) -> list[str]:
             out.append(line)
     out.sort(key=lambda s: (not re.search(r"\b(ул|улица|проспект|пр|шоссе|площадь)\b", s, re.I), -len(s)))
     return out[:limit]
+
+
+# Words that start with a capital letter in page titles but are not place names.
+TITLE_STOP = {
+    "церковь", "храм", "собор", "часовня", "монастырь", "мечеть", "икона", "иконы", "казанской", "божией",
+    "матери", "господня", "святого", "святой", "фотография", "фото", "фасады", "category", "wikimedia",
+    "commons", "church", "of", "the", "theotokos", "russia", "russian", "heritage", "photographs", "taken",
+    "telegram", "view", "без", "заголовка", "обсуждение", "яндекс", "карты", "картинки", "праздник",
+    "портал", "православие", "в", "на", "и", "сайт", "главная", "официальный", "купить", "отзывы", "цена",
+    "википедия", "wikipedia", "file", "файл", "jpg", "png", "life", "pinterest", "vk", "вконтакте",
+    "новости", "news", "media", "медиа", "сотрудники", "рождества", "христова", "пасха", "блог", "фотобанк",
+    "стоковые", "изображения", "обои", "home", "photo", "stock", "images", "дзен", "dzen", "youtube", "rutube",
+}
+_CAPS = re.compile(r"[A-ZА-ЯЁ][a-zа-яё\-]+(?:\s+[A-ZА-ЯЁ][a-zа-яё\-]+){0,3}")
+_ADJ_END = ("ой", "ий", "ый", "ая", "ого", "его", "ей", "ых", "их", "ом")
+
+
+TRANSLIT = dict(zip("абвгдеёжзийклмнопрстуфхцчшщъыьэюя",
+                    ["a", "b", "v", "g", "d", "e", "e", "zh", "z", "i", "y", "k", "l", "m", "n", "o", "p", "r",
+                     "s", "t", "u", "f", "kh", "ts", "ch", "sh", "shch", "", "y", "", "e", "yu", "ya"]))
+LANDMARK_WORDS = ("церк", "храм", "собор", "часовн", "монастыр", "мечет", "синагог", "костел", "костёл", "кирх",
+                  "памятник", "монумент", "мемориал", "статуя", "скульптур", "мост", "вокзал", "башн", "кремл",
+                  "крепост", "замок", "дворец", "усадьб", "музей", "театр", "стадион", "маяк", "фонтан", "арка",
+                  "ратуш", "колокольн", "минарет", "пагод", "обелиск", "телебашн")
+
+
+def norm_latin(text: str) -> str:
+    """Lowercase transliteration so «Старое Чурилино» and «Staroye Churilino» compare equal."""
+    out = "".join(TRANSLIT.get(ch, ch) for ch in text.lower())
+    for a, b in (("ye", "e"), ("yo", "o"), ("iy", "i"), ("yy", "y"), ("kh", "h"), ("j", "y"), ("'", "")):
+        out = out.replace(a, b)
+    return re.sub(r"[^a-z0-9]+", " ", out).strip()
+
+
+def site_key(domain: str) -> str:
+    """yandex.ru / yandex.com / yandex.kz count as one source; news.myseldon.com == myseldon.com."""
+    parts = domain.lower().removeprefix("www.").split(".")
+    if "yandex" in parts or "ya" in parts:
+        return "yandex"
+    return ".".join(parts[-2:])
+
+
+def _domain(site: dict) -> str:
+    if site.get("domain"):
+        return site["domain"]
+    url = site.get("url", "")
+    return url.split("/")[2] if url.count("/") >= 2 else ""
+
+
+def is_landmark(tags: list[str]) -> bool:
+    return any(w in t.lower() for t in tags for w in LANDMARK_WORDS)
+
+
+def place_phrases(sites: list[dict], min_sources: int = 1) -> list[tuple[str, int, int]]:
+    """Capitalised phrases repeated across result pages — likely the place's name.
+
+    `sites` are dicts with title/description/domain. Returns (phrase, independent sites, pages),
+    best first: a name on three different websites beats one listing copied onto three pages.
+    """
+    texts = [f"{s.get('title', '')}. {s.get('description', '')}" for s in sites]
+    norms = [norm_latin(t) for t in texts]
+    pages: dict[str, int] = {}
+    for text in texts:
+        seen: set[str] = set()
+        for m in _CAPS.finditer(text):
+            words = m.group(0).split()
+            while words and words[0].lower() in TITLE_STOP:
+                words.pop(0)
+            while words and words[-1].lower() in TITLE_STOP:
+                words.pop()
+            if not words or any(w.lower() in TITLE_STOP for w in words):
+                continue
+            if len(words) == 1 and (len(words[0]) < 4 or words[0].lower().endswith(_ADJ_END)):
+                continue
+            phrase = " ".join(words)
+            if phrase not in seen:
+                seen.add(phrase)
+                pages[phrase] = pages.get(phrase, 0) + 1
+    ranked = []
+    for phrase, n in pages.items():
+        key = f" {norm_latin(phrase)} "
+        sources = {site_key(_domain(s)) for s, nt in zip(sites, norms) if key in f" {nt} "}
+        sources.discard("")
+        if len(sources) >= min_sources and (n >= 2 or len(sources) >= 2):
+            ranked.append((phrase, len(sources), n))
+    ranked.sort(key=lambda r: (-r[1], -r[2], -len(r[0].split())))
+    return ranked

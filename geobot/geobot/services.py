@@ -2,14 +2,30 @@
 
 import asyncio
 import base64
+import html
+import json
 import logging
+import re
 import time
+from dataclasses import dataclass, field
 from urllib.parse import quote
 
 import aiohttp
 
 log = logging.getLogger(__name__)
 TIMEOUT = aiohttp.ClientTimeout(total=40)
+BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/130.0 Safari/537.36")
+YANDEX = "https://yandex.ru/images/search"
+
+
+@dataclass
+class YandexResult:
+    page_url: str  # results page the user can open
+    image_url: str = ""  # public copy of the photo on Yandex's CDN
+    tags: list[str] = field(default_factory=list)  # "Похоже на …" labels
+    sites: list[dict] = field(default_factory=list)  # pages with this image: title, description, url, domain
+    ocr_text: str = ""  # text Yandex read on the photo
 
 
 class Services:
@@ -43,6 +59,30 @@ class Services:
             log.warning("ocr error: %s", data.get("ErrorMessage") if isinstance(data, dict) else data)
             return ""
         return "\n".join(p.get("ParsedText", "") for p in data.get("ParsedResults") or []).strip()
+
+    # --- Yandex reverse image search (upload, no public link needed) ------
+    async def yandex(self, jpeg: bytes) -> YandexResult | None:
+        headers = {"User-Agent": BROWSER_UA, "Accept-Language": "ru-RU,ru;q=0.9"}
+        form = aiohttp.FormData()
+        form.add_field("upfile", jpeg, filename="photo.jpg", content_type="image/jpeg")
+        params = {"rpt": "imageview", "format": "json",
+                  "request": '{"blocks":[{"block":"b-page_type_search-by-image__link"}]}'}
+        try:
+            async with self.http.post(YANDEX, params=params, data=form, headers=headers, timeout=TIMEOUT) as r:
+                data = await r.json(content_type=None)
+            p = data["blocks"][0]["params"]
+            res = YandexResult(page_url=f"{YANDEX}?rpt=imageview&cbir_id={quote(p['cbirId'], safe='')}",
+                               image_url=p.get("originalImageUrl", ""))
+        except Exception as e:
+            log.warning("yandex upload failed: %s", e)
+            return None
+        try:
+            async with self.http.get(res.page_url + "&cbir_page=sites", headers=headers, timeout=TIMEOUT) as r:
+                page = await r.text()
+            parse_yandex(page, res)
+        except Exception as e:  # results page may show a captcha; the link still works for the user
+            log.warning("yandex results failed: %s", e)
+        return res
 
     # --- temporary public link for reverse image search -------------------
     async def temp_upload(self, jpeg: bytes) -> str | None:
@@ -129,10 +169,31 @@ class Services:
         return out
 
 
-def search_links(image_url: str) -> dict[str, str]:
-    u = quote(image_url, safe="")
-    return {
-        "Яндекс": f"https://yandex.ru/images/search?rpt=imageview&url={u}",
-        "Google Lens": f"https://lens.google.com/uploadbyurl?url={u}",
-        "Bing": f"https://www.bing.com/images/search?view=detailv2&iss=sbi&form=SBIVSP&sbisrc=UrlPaste&q=imgurl:{u}",
-    }
+def parse_yandex(page: str, res: YandexResult) -> None:
+    """Pull tags and matching sites out of the results page's embedded JSON state."""
+    for raw in re.findall(r'data-state="([^"]+)"', page):
+        if "cbirSites" not in raw and "cbirTags" not in raw:
+            continue
+        try:
+            state = json.loads(html.unescape(raw)).get("initialState", {})
+        except (ValueError, AttributeError):
+            continue
+        res.tags = [t["text"] for t in (state.get("cbirTags") or {}).get("tags", []) if t.get("text")][:8]
+        res.ocr_text = ((state.get("cbirOcr") or {}).get("plainText") or "").strip()
+        for s in (state.get("cbirSites") or {}).get("sites", [])[:12]:
+            if s.get("title"):
+                res.sites.append({"title": s["title"], "description": s.get("description", ""),
+                                  "url": s.get("url", ""), "domain": s.get("domain", "")})
+        return
+
+
+def search_links(image_url: str | None, yandex_page: str | None = None) -> dict[str, str]:
+    links = {}
+    if yandex_page:
+        links["Яндекс"] = yandex_page
+    if image_url:
+        u = quote(image_url, safe="")
+        links.setdefault("Яндекс", f"{YANDEX}?rpt=imageview&url={u}")
+        links["Google Lens"] = f"https://lens.google.com/uploadbyurl?url={u}"
+        links["Bing"] = f"https://www.bing.com/images/search?view=detailv2&iss=sbi&form=SBIVSP&sbisrc=UrlPaste&q=imgurl:{u}"
+    return links

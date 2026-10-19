@@ -44,6 +44,16 @@ def summary(rep: Report) -> str:
         out.append("\n🔎 <b>Найдено в тексте на фото:</b>")
         out += [f"• {escape(c.text)} → <b>{escape(c.place)}</b>" for c in rep.clues[:12]]
 
+    ya = rep.yandex
+    if ya and (ya.tags or ya.sites):
+        out.append("\n🔍 <b>Яндекс нашёл:</b>")
+        if ya.tags:
+            out.append("• похоже на: " + escape(", ".join(ya.tags[:4])))
+        key = (rep.best.label.split(", ")[-1].lower() if rep.best else "")
+        sites = sorted(ya.sites, key=lambda st: key not in (st["title"] + " " + st["description"]).lower())
+        for site in sites[:3]:
+            out.append(f"• {escape(site['title'][:90])}")
+
     g = rep.gemini
     if g:
         where = ", ".join(str(g[k]) for k in ("place", "city", "region", "country") if g.get(k) and str(g[k]) != "null")
@@ -72,6 +82,11 @@ def dossier(rep: Report) -> str:
         lines.append("- текст на фото: " + rep.ocr_text.replace("\n", " | ")[:600])
     for c in rep.clues:
         lines.append(f"- {c.text} → {c.place}")
+    if rep.yandex:
+        if rep.yandex.tags:
+            lines.append("- Яндекс: похоже на " + ", ".join(rep.yandex.tags[:5]))
+        for site in rep.yandex.sites[:5]:
+            lines.append(f"- страница с этим фото: {site['title']}")
     if rep.best:
         lines.append(f"- предварительно: {rep.best.label} ({rep.best.lat:.4f}, {rep.best.lon:.4f}), "
                      f"уверенность {CONF.get(rep.best.confidence)}")
