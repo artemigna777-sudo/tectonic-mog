@@ -1,3 +1,5 @@
 .env
 __pycache__/
 *.pyc
+geobot_history.json
+*.tmp

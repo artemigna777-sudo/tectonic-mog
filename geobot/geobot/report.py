@@ -56,21 +56,32 @@ def summary(rep: Report) -> str:
 
     g = rep.gemini
     if g:
-        where = ", ".join(str(g[k]) for k in ("place", "city", "region", "country") if g.get(k) and str(g[k]) != "null")
-        out.append(f"\n🤖 <b>Gemini:</b> {escape(where or 'не уверен')} "
-                   f"(уверенность {CONF.get(g.get('confidence'), '?')})")
+        out.append(f"\n🤖 <b>Gemini</b> (уверенность {CONF.get(g.get('confidence'), '?')}):")
         if g.get("confidence_claimed"):
             out.append(f"  ↳ Gemini считал уверенность {CONF.get(g['confidence_claimed'])}, но ни текст на фото, "
-                       "ни поиск по картинке этого не подтверждают — поэтому это лишь догадка, точку по ней не ставлю.")
+                       "ни поиск по картинке этого не подтверждают — поэтому точный адрес не ставлю.")
+        for i, c in enumerate(g.get("candidates") or [], 1):
+            where = ", ".join(x for x in (c.get("place"), c.get("city"), c.get("region"), c.get("country")) if x)
+            out.append(f"{i}. {escape(where[:90])} — <b>{c.get('probability', 0):g}%</b>")
+        if rep.details:
+            out.append("🔬 Рассмотрел крупно: " + escape(", ".join(rep.details)))
         for c in (g.get("clues") or [])[:6]:
-            out.append(f"• {escape(str(c))}")
+            out.append(f"• {escape(str(c)[:160])}")
+        for src in (g.get("sources") or [])[:3]:
+            out.append(f"🌐 Проверял в Google: {escape((src.get('title') or src.get('uri') or '')[:80])}")
 
     if rep.ocr_text:
         text = rep.ocr_text.strip().replace("\n", " · ")
         out.append(f"\n📝 Текст на фото: <i>{escape(text[:300])}{'…' if len(text) > 300 else ''}</i>")
     if rep.notes:
         out.append("\n⚠️ " + "\n⚠️ ".join(escape(n) for n in rep.notes))
-    return "\n".join(out)[:4000]
+    out.append("\n✍️ Знаете, где это? Ответьте на это сообщение: <code>/ответ город, улица</code> "
+               "(или пришлите геопозицию) — посчитаю ошибку.")
+    text = "\n".join(out)
+    while len(text) > 4000 and len(out) > 3:  # Telegram limit; drop whole lines so HTML tags stay closed
+        out.pop(-2)
+        text = "\n".join(out)
+    return text
 
 
 def dossier(rep: Report) -> str:
@@ -90,6 +101,9 @@ def dossier(rep: Report) -> str:
             lines.append("- Яндекс: похоже на " + ", ".join(rep.yandex.tags[:5]))
         for site in rep.yandex.sites[:5]:
             lines.append(f"- страница с этим фото: {site['title']}")
+    for c in (rep.gemini or {}).get("candidates") or []:
+        where = ", ".join(x for x in (c.get("place"), c.get("city"), c.get("region"), c.get("country")) if x)
+        lines.append(f"- вариант Gemini: {where} ({c.get('probability', 0):g}%)")
     if rep.best:
         lines.append(f"- предварительно: {rep.best.label} ({rep.best.lat:.4f}, {rep.best.lon:.4f}), "
                      f"уверенность {CONF.get(rep.best.confidence)}")

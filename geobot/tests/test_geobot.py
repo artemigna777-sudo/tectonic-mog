@@ -1,11 +1,15 @@
 import asyncio
 import io
+import time
 
 from PIL import Image
 
 from geobot.analyze import Report, _country_code, _pick_best, analyze
 from geobot.config import Config
 from geobot.exif import read_meta
+from geobot.gemini import Gemini, normalize, parse_json
+from geobot.history import History, distance_km
+from geobot.imaging import crop_boxes
 from geobot.report import dossier, summary
 from geobot.services import YandexResult, parse_yandex, search_links
 from geobot.textclues import find_clues, geocode_queries, place_phrases
@@ -105,7 +109,7 @@ def test_one_listing_copied_across_yandex_domains_counts_once():
 def test_lookalike_houses_are_not_an_answer():
     page = YANDEX_PAGE.replace("церковь казанской иконы", "коттедж")
     svc = FakeSvc(ya_page=page, geo={"Старое Чурилино": (56.0272, 49.7291, "Старое Чурилино, Арский район, Татарстан")})
-    rep = asyncio.run(analyze(plain_jpeg(), True, CFG, None, svc))
+    rep = asyncio.run(analyze(plain_jpeg(), True, svc))
     assert rep.best is None and any("похожие" in n for n in rep.notes)
 
 
@@ -120,6 +124,7 @@ class FakeSvc:
         return "https://litter.catbox.moe/x.jpg"
 
     async def yandex(self, jpeg):
+        self.yandex_calls = getattr(self, "yandex_calls", 0) + 1
         if not self.ya_page:
             return None
         r = YandexResult(page_url="https://yandex.ru/images/search?cbir_id=1", image_url="https://avatars.mds.yandex.net/o")
@@ -145,7 +150,7 @@ CFG = Config(bot_token="1:x", allowed_users={1}, ocr_space_key="k")
 
 
 def test_analyze_uses_gps_first():
-    rep = asyncio.run(analyze(jpeg_with_gps(), False, CFG, None, FakeSvc()))
+    rep = asyncio.run(analyze(jpeg_with_gps(), False, FakeSvc()))
     assert rep.best.source == "GPS в файле" and rep.best.confidence == "high"
     assert rep.links and rep.commons and rep.address
     text = summary(rep)
@@ -154,7 +159,7 @@ def test_analyze_uses_gps_first():
 
 def test_analyze_geocodes_ocr_address_in_agreed_country():
     svc = FakeSvc("ул. Баумана, 15\nтел. 8 (843) 123-45-67", geo={"ул. Баумана, 15": (55.79, 49.11)})
-    rep = asyncio.run(analyze(plain_jpeg(), True, CFG, None, svc))
+    rep = asyncio.run(analyze(plain_jpeg(), True, svc))
     assert rep.best and rep.best.source.startswith("текст на фото")
     assert ("ул. Баумана, 15", "ru") in svc.queries
     assert "файлом" in summary(rep)  # compressed photo -> hint to send as file
@@ -163,9 +168,9 @@ def test_analyze_geocodes_ocr_address_in_agreed_country():
 
 def test_city_clue_fallback_and_nothing_found():
     svc = FakeSvc("тел. 8 (843) 123-45-67", geo={"Казань": (55.79, 49.12)})
-    rep = asyncio.run(analyze(plain_jpeg(), True, CFG, None, svc))
+    rep = asyncio.run(analyze(plain_jpeg(), True, svc))
     assert rep.best.label == "Казань" and rep.best.confidence == "low"
-    rep2 = asyncio.run(analyze(plain_jpeg(), True, CFG, None, FakeSvc()))
+    rep2 = asyncio.run(analyze(plain_jpeg(), True, FakeSvc()))
     assert rep2.best is None and "не удалось" in summary(rep2).lower()
 
 
@@ -202,17 +207,16 @@ class FakeTG:
         return self.file
 
 
-def test_bot_flow_photo_and_access():
+def test_bot_flow_photo_and_access(tmp_path):
     from geobot.bot import GeoBot
 
     tg = FakeTG(jpeg_with_gps())
-    bot = GeoBot(CFG, None, tg=tg, svc=FakeSvc())
+    bot = GeoBot(CFG, None, tg=tg, svc=FakeSvc(), history=History(tmp_path / "h.json"))
     asyncio.run(bot.handle({"update_id": 1, "message": {"message_id": 5, "chat": {"id": 1}, "from": {"id": 1},
                                                          "document": {"file_id": "f", "mime_type": "image/jpeg"}}}))
     methods = [m for m, _ in tg.calls]
-    assert methods[:2] == ["sendMessage", "editMessageText"]
-    assert "sendLocation" in methods and "sendPhoto" in methods
-    edit = dict(tg.calls[1][1])
+    assert methods[0] == "sendMessage" and "sendLocation" in methods and "sendPhoto" in methods
+    edit = [params for m, params in tg.calls if m == "editMessageText" and params.get("buttons")][0]
     assert any("Яндекс" in b[0]["text"] for b in edit["buttons"])
     assert edit["buttons"][-1][0]["callback_data"] == "d:1:5"
 
@@ -221,7 +225,7 @@ def test_bot_flow_photo_and_access():
     assert "Где снято это фото" in tg.calls[-2][1]["text"]
 
     tg2 = FakeTG()
-    stranger = GeoBot(CFG, None, tg=tg2, svc=FakeSvc())
+    stranger = GeoBot(CFG, None, tg=tg2, svc=FakeSvc(), history=History(tmp_path / "h2.json"))
     asyncio.run(stranger.handle({"update_id": 3, "message": {"message_id": 1, "chat": {"id": 7}, "from": {"id": 7},
                                                               "photo": [{"file_id": "x"}]}}))
     assert len(tg2.calls) == 1 and "закрытый" in tg2.calls[0][1]["text"]
@@ -230,7 +234,7 @@ def test_bot_flow_photo_and_access():
 def test_street_is_searched_inside_city_from_phone_code():
     svc = FakeSvc("ул. Баумана, 19\nтел. 8 (843) 292-00-00",
                   geo={"ул. Баумана, 19, Казань": (55.791, 49.114), "ул. Баумана, 19": (1, 1)})
-    rep = asyncio.run(analyze(plain_jpeg(), True, CFG, None, svc))
+    rep = asyncio.run(analyze(plain_jpeg(), True, svc))
     assert rep.best.label == "ул. Баумана, 19, Казань" and rep.best.confidence == "medium"
     assert svc.queries[0] == ("ул. Баумана, 19, Казань", "ru")
 
@@ -238,7 +242,7 @@ def test_street_is_searched_inside_city_from_phone_code():
 def test_yandex_matches_pin_the_place_and_object():
     svc = FakeSvc(ya_page=YANDEX_PAGE, geo={"Старое Чурилино": (56.0272, 49.7291, "Старое Чурилино, Арский район, Татарстан, Россия"),
                                              "церковь казанской иконы, Старое Чурилино": (56.0281, 49.7302)})
-    rep = asyncio.run(analyze(plain_jpeg(), True, CFG, None, svc))
+    rep = asyncio.run(analyze(plain_jpeg(), True, svc))
     assert rep.best.confidence == "high" and rep.best.radius_km == 0.2
     assert (rep.best.lat, rep.best.lon) == (56.0281, 49.7302)
     assert "Яндекс" in rep.links and rep.links["Яндекс"].endswith("cbir_id=1")
@@ -250,49 +254,50 @@ def test_yandex_name_without_matching_region_is_ignored():
     page = YANDEX_PAGE.replace("Старое Чурилино", "Ах Катя").replace("Арский район", "Ярославский район") \
                       .replace("Республика Татарстан", "Ярославская область")
     svc = FakeSvc(ya_page=page, geo={"Ах Катя": (61.8, 30.7, "Катя, Сортавальский округ, Карелия, Россия")})
-    rep = asyncio.run(analyze(plain_jpeg(), True, CFG, None, svc))
+    rep = asyncio.run(analyze(plain_jpeg(), True, svc))
     assert rep.best is None
 
 
-GEMINI_CFG = Config(bot_token="1:x", allowed_users={1}, ocr_space_key="k", gemini_api_key="g")
+class FakeGemini:
+    def __init__(self, answer, boxes=()):
+        self.answer, self.boxes, self.seen, self.last_error = answer, list(boxes), {}, ""
+
+    async def locate_details(self, jpeg):
+        return self.boxes
+
+    async def analyze(self, jpeg, crops, hints):
+        self.seen.update(hints=hints, crops=crops)
+        return normalize(dict(self.answer)) if self.answer else None
 
 
-def run_with_gemini(monkeypatch, answer, svc):
-    import geobot.analyze as an
-
-    seen = {}
-
-    async def fake_gemini(session, key, model, jpeg, hints):
-        seen["hints"] = hints
-        return dict(answer)
-
-    monkeypatch.setattr(an, "ask_gemini", fake_gemini)
-    return asyncio.run(analyze(plain_jpeg(), True, GEMINI_CFG, None, svc)), seen
+def run_with_gemini(answer, svc, boxes=()):
+    gem = FakeGemini(answer, boxes)
+    return asyncio.run(analyze(plain_jpeg(), True, svc, gem)), gem.seen
 
 
 LOOKALIKE_PAGE = YANDEX_PAGE.replace("церковь казанской иконы", "коттедж").replace("Старое Чурилино", "Лесная сказка")
 
 
-def test_unsupported_confident_gemini_is_downgraded_to_region(monkeypatch):
+def test_unsupported_confident_gemini_is_downgraded_to_region():
     answer = {"place": "ЖК «Лесная сказка»", "city": "Красный Бор", "region": "Ярославская область",
               "country": "Россия", "confidence": "high", "radius_km": 0.5}
     svc = FakeSvc(ya_page=LOOKALIKE_PAGE, geo={"Ярославская область, Россия": (57.8, 39.5),
                                                 "ЖК «Лесная сказка», Красный Бор, Ярославская область, Россия": (57.6, 40.0)})
-    rep, seen = run_with_gemini(monkeypatch, answer, svc)
+    rep, seen = run_with_gemini(answer, svc)
     # lookalike pages are not shown to Gemini at all
     assert "Лесная сказка" not in seen["hints"] and "похожие дома" in seen["hints"]
     assert rep.gemini["confidence"] == "low" and rep.gemini["confidence_claimed"] == "high"
     assert rep.best.label == "Ярославская область, Россия" and rep.best.radius_km >= 100
     assert rep.best.confidence == "low"
-    assert "лишь догадка" in summary(rep)
+    assert "точный адрес не ставлю" in summary(rep)
 
 
-def test_gemini_backed_by_landmark_matches_keeps_its_confidence(monkeypatch):
+def test_gemini_backed_by_landmark_matches_keeps_its_confidence():
     answer = {"place": "Церковь Казанской иконы", "city": "Старое Чурилино", "region": "Татарстан",
               "country": "Россия", "confidence": "high"}
     q = "Церковь Казанской иконы, Старое Чурилино, Татарстан, Россия"
     svc = FakeSvc(ya_page=YANDEX_PAGE, geo={q: (56.028, 49.730)})
-    rep, seen = run_with_gemini(monkeypatch, answer, svc)
+    rep, seen = run_with_gemini(answer, svc)
     assert "Старое Чурилино" in seen["hints"]
     assert rep.gemini["confidence"] == "high" and rep.best.confidence == "high" and rep.best.radius_km == 0.5
 
@@ -300,3 +305,148 @@ def test_gemini_backed_by_landmark_matches_keeps_its_confidence(monkeypatch):
 def test_noise_words_are_not_places():
     sites = [{"title": "Продажа двухкомнатной квартиры, Быково", "url": f"https://s{i}.ru/x"} for i in range(3)]
     assert all(p[0] != "Продажа" for p in place_phrases(sites))
+
+
+# --- stage 1: zoomed details, model fallback, candidates, accuracy tracking ---------------------
+
+def test_crop_boxes_cut_sharp_details_from_original():
+    img = Image.new("RGB", (4000, 3000), "white")
+    img.paste((255, 0, 0), (1000, 1000, 1400, 1200))  # a small red "sign"
+    buf = io.BytesIO()
+    img.save(buf, "JPEG")
+    crops = crop_boxes(buf.getvalue(), [{"box_2d": [333, 250, 400, 350], "label": "вывеска"},
+                                        {"box_2d": [500, 500, 500, 600], "label": "пусто"}])
+    assert [label for label, _ in crops] == ["вывеска"]
+    piece = Image.open(io.BytesIO(crops[0][1]))
+    assert max(piece.size) == 768
+    r, g, b = piece.getpixel((piece.width // 2, piece.height // 2))
+    assert r > 200 and g < 60
+
+
+def test_normalize_sorts_candidates_and_flattens_top():
+    g = normalize({"observations": ["бетонный столб → СНГ"], "confidence": "medium", "candidates": [
+        {"region": "Чувашия", "country": "Россия", "lat": 55.5, "lon": 47.2, "probability": 20},
+        {"region": "Татарстан", "country": "Россия", "city": "null", "lat": 55.8, "lon": 49.1, "probability": "45"}]})
+    assert [c["region"] for c in g["candidates"]] == ["Татарстан", "Чувашия"]
+    assert g["region"] == "Татарстан" and g["city"] is None and g["lat"] == 55.8
+    assert g["clues"] == ["бетонный столб → СНГ"]
+    assert parse_json('Вот ответ: {"a": 1} — готово') == {"a": 1}
+
+
+class FakeResp:
+    def __init__(self, status, data):
+        self.status, self.data = status, data
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    async def json(self, content_type=None):
+        return self.data
+
+
+class FakeHTTP:
+    """Scripted Gemini endpoint: script maps model -> list of (status, payload) per call."""
+
+    def __init__(self, script):
+        self.script, self.calls, self.prompts = script, [], []
+
+    def post(self, url, json=None, headers=None, timeout=None):
+        model = url.split("/models/")[1].split(":")[0]
+        self.calls.append((model, "tools" in json))
+        self.prompts.append(json["contents"][0]["parts"][0].get("text", ""))
+        return FakeResp(*self.script[model].pop(0))
+
+
+def ok(text, chunks=()):
+    return 200, {"candidates": [{"content": {"parts": [{"text": text}]},
+                                 "groundingMetadata": {"groundingChunks": [{"web": c} for c in chunks]}}]}
+
+
+def test_gemini_falls_back_to_next_model_and_drops_search_when_refused():
+    http = FakeHTTP({
+        "m1": [(429, {"error": {"message": "Quota exceeded for metric: free_tier_requests, limit: 20", "details": [
+            {"@type": "type.googleapis.com/google.rpc.QuotaFailure",
+             "violations": [{"quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier"}]},
+            {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "41s"}]}})],
+        "m2": [(400, {"error": {"message": "Search grounding is not supported"}}),
+               ok('{"candidates": [{"region": "Татарстан", "country": "Россия", "probability": 60}], "confidence": "low"}')],
+    })
+    gem = Gemini(http, "k", ["m1", "m2"], ["lite"], search=True)
+    g = asyncio.run(gem.analyze(b"jpeg", [("столб", b"crop")], "нет"))
+    assert g["region"] == "Татарстан" and g["model"] == "m2"
+    assert http.calls == [("m1", True), ("m2", True), ("m2", False)]
+    assert "поиск Google" in http.prompts[0] and "поиск Google" not in http.prompts[2]
+    assert gem.search_ok is False and gem.blocked["m1"] - time.time() > 3600  # daily quota: blocked till reset
+    # m1 stays blocked until the daily reset, so the next photo goes straight to m2
+    http.script["m2"] = [ok('{"candidates": [], "confidence": "low"}')]
+    asyncio.run(gem.analyze(b"jpeg", [], "нет"))
+    assert http.calls[-1] == ("m2", False)
+
+
+def test_gemini_keeps_google_sources_when_search_works():
+    http = FakeHTTP({"m1": [ok('```json\n{"candidates": [{"region": "Татарстан", "probability": 50}]}\n```',
+                               chunks=[{"title": "Дубровка — Википедия", "uri": "https://x"}])]})
+    g = asyncio.run(Gemini(http, "k", ["m1"], []).analyze(b"jpeg", [], "нет"))
+    assert g["sources"][0]["title"].startswith("Дубровка")
+
+
+def test_locate_details_uses_lite_then_bigger_models():
+    http = FakeHTTP({"lite": [(429, {"error": {"message": "limit", "details": [{"retryDelay": "20s"}]}})],
+                     "m1": [ok('[{"box_2d": [10, 20, 300, 400], "label": "столб"}, {"box_2d": "bad"}]')]})
+    gem = Gemini(http, "k", ["m1"], ["lite"])
+    boxes = asyncio.run(gem.locate_details(b"jpeg"))
+    assert boxes == [{"box_2d": [10.0, 20.0, 300.0, 400.0], "label": "столб"}]
+    assert [c[0] for c in http.calls] == ["lite", "m1"]
+    assert 20 < gem.blocked["lite"] - time.time() < 30  # per-minute limit: short pause from retryDelay
+
+
+def test_analyze_zooms_details_and_searches_them_in_yandex():
+    big = io.BytesIO()
+    Image.new("RGB", (2000, 1500), "gray").save(big, "JPEG")
+    svc = FakeSvc(ya_page=LOOKALIKE_PAGE, geo={"Татарстан, Россия": (55.5, 50.5)})
+    answer = {"candidates": [{"region": "Татарстан", "country": "Россия", "probability": 40, "lat": 55.8, "lon": 49.1},
+                             {"region": "Чувашия", "country": "Россия", "probability": 25}], "confidence": "low"}
+    gem = FakeGemini(answer, boxes=[{"box_2d": [100, 100, 400, 400], "label": "фасад"},
+                                    {"box_2d": [500, 500, 900, 900], "label": "столб"}])
+    rep = asyncio.run(analyze(big.getvalue(), True, svc, gem))
+    assert [label for label, _ in gem.seen["crops"]] == ["фасад", "столб"]
+    assert svc.yandex_calls == 3  # whole photo + two crops (no landmark recognised on the whole photo)
+    assert rep.best.label == "Татарстан, Россия" and rep.best.radius_km >= 100 and "40%" in rep.best.source
+    text = summary(rep)
+    assert "1. Татарстан, Россия — <b>40%</b>" in text and "Рассмотрел крупно: фасад, столб" in text
+
+
+def test_history_measures_error_and_stats(tmp_path):
+    h = History(tmp_path / "h.json")
+    h.add("1:5", {"chat": 1, "photo_msg": 5, "result_msg": 6, "best": {"lat": 55.79, "lon": 49.12, "label": "Казань"},
+                  "candidates": [{"lat": 56.0, "lon": 49.0}, {"lat": 55.85, "lon": 48.52}]})
+    assert h.find(1, reply_to=6)[0] == "1:5" and h.find(1)[0] == "1:5" and h.find(2) is None
+    rec = h.set_truth("1:5", 55.85, 48.52, "Дубровка")
+    assert 35 < rec["error_km"] < 45 and min(rec["candidate_errors"]) < 0.1
+    st = History(tmp_path / "h.json").stats()  # reloaded from disk
+    assert st["answered"] == 1 and st["buckets"][1] == ("до 25 км (город)", 0) and st["buckets"][2][1] == 1
+    assert st["top5_region"] == 1
+    assert abs(distance_km(55.75, 37.62, 59.94, 30.31) - 634) < 5  # Moscow - St Petersburg
+
+
+def test_bot_answer_command_location_and_stats(tmp_path):
+    from geobot.bot import GeoBot
+
+    tg = FakeTG(jpeg_with_gps())
+    svc = FakeSvc(geo={"Дубровка, Зеленодольский район": (55.85, 48.52, "Дубровка, Зеленодольский район, Татарстан")})
+    bot = GeoBot(CFG, None, tg=tg, svc=svc, history=History(tmp_path / "h.json"))
+    msg = {"message_id": 5, "chat": {"id": 1}, "from": {"id": 1}}
+    asyncio.run(bot.handle({"update_id": 1, "message": {**msg, "document": {"file_id": "f", "mime_type": "image/jpeg"}}}))
+    asyncio.run(bot.handle({"update_id": 2, "message": {**msg, "message_id": 8, "text": "/ответ Дубровка, Зеленодольский район",
+                                                         "reply_to_message": {"message_id": 99}}}))
+    reply = tg.calls[-1][1]["text"]
+    assert "Записал правильный ответ" in reply and "Ошибка бота" in reply and "Точность" in reply
+    asyncio.run(bot.handle({"update_id": 3, "message": {**msg, "message_id": 9,
+                                                         "location": {"latitude": 55.7917, "longitude": 49.12}}}))
+    assert "Ошибка бота: <b>" in tg.calls[-1][1]["text"]
+    asyncio.run(bot.handle({"update_id": 4, "message": {**msg, "message_id": 10, "text": "/answer 55.79, 49.12"}}))
+    asyncio.run(bot.handle({"update_id": 5, "message": {**msg, "message_id": 11, "text": "/stats"}}))
+    assert "по 1 фото" in tg.calls[-1][1]["text"]

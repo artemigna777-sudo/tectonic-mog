@@ -2,13 +2,12 @@
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
-import aiohttp
-
-from .config import Config
 from .exif import PhotoMeta, jpeg_for_upload, read_meta
-from .gemini import ask_gemini
+from .gemini import Gemini
+from .imaging import crop_boxes
 from .services import Services, YandexResult, search_links
 from .textclues import Clue, find_clues, geocode_queries, is_landmark, norm_latin, place_phrases
 
@@ -46,7 +45,22 @@ class Report:
     best: Best | None = None
     address: str | None = None
     commons: list[dict] = field(default_factory=list)
+    details: list[str] = field(default_factory=list)  # labels of the zoomed-in crops Gemini looked at
     notes: list[str] = field(default_factory=list)
+
+
+def merge_yandex(base: YandexResult | None, extra: YandexResult | None) -> YandexResult | None:
+    """Fold results of searching a crop into the full-photo search."""
+    if not extra:
+        return base
+    if not base:
+        return extra
+    seen = {s["url"] for s in base.sites}
+    base.sites += [s for s in extra.sites if s["url"] not in seen]
+    base.tags += [t for t in extra.tags if t not in base.tags]
+    if extra.ocr_text and extra.ocr_text not in base.ocr_text:
+        base.ocr_text = (base.ocr_text + "\n" + extra.ocr_text).strip()
+    return base
 
 
 def _country_code(clues: list[Clue], gemini: dict | None) -> str:
@@ -115,7 +129,18 @@ def _float(v) -> float | None:
         return None
 
 
-async def analyze(data: bytes, compressed: bool, cfg: Config, session: aiohttp.ClientSession, svc: Services) -> Report:
+Progress = Callable[[str], Awaitable[None]]
+
+
+async def analyze(data: bytes, compressed: bool, svc: Services, gemini: Gemini | None = None,
+                  progress: Progress | None = None) -> Report:
+    async def say(text: str) -> None:
+        if progress:
+            try:
+                await progress(text)
+            except Exception:  # a status update must never break the analysis
+                pass
+
     meta = read_meta(data)
     rep = Report(meta=meta, compressed=compressed)
     try:
@@ -125,10 +150,22 @@ async def analyze(data: bytes, compressed: bool, cfg: Config, session: aiohttp.C
         rep.notes.append("Не удалось открыть изображение.")
         return rep
 
+    await say("🔍 Читаю текст на фото и ищу его в Яндексе…")
     ocr_task = asyncio.create_task(svc.ocr(jpeg))
     yandex_task = asyncio.create_task(svc.yandex(jpeg))
+    boxes_task = asyncio.create_task(gemini.locate_details(jpeg)) if gemini else None
     rep.ocr_text = await ocr_task
     rep.yandex = await yandex_task
+    boxes = await boxes_task if boxes_task else []
+
+    crops = await asyncio.to_thread(crop_boxes, data, boxes) if boxes else []
+    rep.details = [label for label, _ in crops]
+    if crops and not (rep.yandex and is_landmark(rep.yandex.tags)):
+        # a facade or a sign searched on its own often finds what the whole frame does not
+        await say("🔍 Ищу в Яндексе отдельные детали фото…")
+        for extra in await asyncio.gather(*(svc.yandex(c) for _, c in crops[:2])):
+            rep.yandex = merge_yandex(rep.yandex, extra)
+
     if rep.yandex and rep.yandex.ocr_text and rep.yandex.ocr_text not in rep.ocr_text:
         rep.ocr_text = (rep.ocr_text + "\n" + rep.yandex.ocr_text).strip()  # Yandex reads text on the photo too
     rep.clues = find_clues(rep.ocr_text)
@@ -140,20 +177,17 @@ async def analyze(data: bytes, compressed: bool, cfg: Config, session: aiohttp.C
     if not rep.links:
         rep.notes.append("Не удалось загрузить фото в поиск по картинке.")
 
-    if cfg.gemini_enabled:
-        hints = _hints(meta, rep.ocr_text, rep.clues, rep.yandex)
-        g = await ask_gemini(session, cfg.gemini_api_key, cfg.gemini_model, jpeg, hints)
-        if g and g.get("error"):
-            rep.notes.append("Gemini: закончился бесплатный лимит, попробуйте позже." if g["error"] == "quota"
-                             else f"Gemini: ошибка {g['error']}")
-        elif g:
+    if gemini:
+        await say("🤖 Gemini рассматривает фото и детали…")
+        g = await gemini.analyze(jpeg, crops, _hints(meta, rep.ocr_text, rep.clues, rep.yandex))
+        if g:
             rep.gemini = g
             if g.get("confidence") in ("high", "medium") and not _gemini_supported(rep, g):
                 g["confidence_claimed"], g["confidence"] = g["confidence"], "low"
         else:
-            rep.notes.append("Gemini не ответил.")
+            rep.notes.append(f"Gemini: {gemini.last_error or 'не ответил'}.")
 
-
+    await say("🗺 Проверяю место по карте…")
     rep.best = await _pick_best(rep, svc)
     if rep.best:
         rep.address = await svc.reverse(rep.best.lat, rep.best.lon)
@@ -211,17 +245,20 @@ async def _pick_best(rep: Report, svc: Services) -> Best | None:
 
 
 async def _gemini_region(svc: Services, g: dict, country: str) -> Best | None:
+    """Gemini's most likely candidate at region level: no invented street, honest radius."""
     region, ctry = g.get("region"), g.get("country")
-    region = region if region and str(region).lower() != "null" else None
-    ctry = ctry if ctry and str(ctry).lower() != "null" else None
     query = ", ".join(str(x) for x in (region, ctry) if x)
-    if not query:
-        return None
-    hits = await svc.geocode(query, country)
-    if not hits:
+    lat, lon = _float(g.get("lat")), _float(g.get("lon"))
+    if query:
+        hits = await svc.geocode(query, country)
+        if hits:
+            lat, lon = float(hits[0]["lat"]), float(hits[0]["lon"])
+    if lat is None or lon is None or not query:
         return None
     radius = max(_float(g.get("radius_km")) or 0, 100 if region else 500)
-    return Best(float(hits[0]["lat"]), float(hits[0]["lon"]), query, radius, "low", "догадка Gemini без подтверждений")
+    prob = (g.get("candidates") or [{}])[0].get("probability")
+    source = f"самый вероятный кандидат Gemini ({prob:g}%)" if prob else "догадка Gemini"
+    return Best(lat, lon, query, radius, "low", source + ", без подтверждений")
 
 
 def _matches_context(display_name: str, phrase: str, context: str) -> bool:
