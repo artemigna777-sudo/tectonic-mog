@@ -33,6 +33,11 @@ def _ids(raw: str) -> set[int]:
     return {int(x) for x in raw.replace(";", ",").split(",") if x.strip().isdigit()}
 
 
+def _int(raw: str, default: int) -> int:
+    raw = raw.strip()
+    return int(raw) if raw.isdigit() else default
+
+
 @dataclass
 class Config:
     bot_token: str
@@ -46,6 +51,14 @@ class Config:
     contact: str = "geobot"
     history_file: str = "geobot_history.json"
     history_hint: bool = True  # tell Gemini where this user's earlier photos turned out to be
+    public: bool = False  # ALLOWED_USERS=* — anyone may use the bot
+    admins: set[int] = field(default_factory=set)  # no daily limit, may /ban and see /admin
+    daily_limit: int = 5  # photos per user per day (Moscow time); 0 — unlimited; admins are exempt
+    users_file: str = "geobot_users.json"
+    queue_limit: int = 20  # photos waiting at once; more and new ones are turned away
+
+    def allowed(self, uid: int | None) -> bool:
+        return uid is not None and (self.public or uid in self.allowed_users or uid in self.admins)
 
     @property
     def gemini_enabled(self) -> bool:
@@ -56,9 +69,17 @@ class Config:
         token = os.environ.get("BOT_TOKEN", "").strip()
         if not token:
             raise SystemExit("BOT_TOKEN is not set (see .env.example)")
+        allowed = os.environ.get("ALLOWED_USERS", "")
+        users = _ids(allowed)
         return cls(
             bot_token=token,
-            allowed_users=_ids(os.environ.get("ALLOWED_USERS", "")),
+            allowed_users=users,
+            public="*" in allowed,
+            # without ADMIN_USERS the IDs listed in ALLOWED_USERS are the admins (the owner, in private mode)
+            admins=_ids(os.environ.get("ADMIN_USERS", "")) or users,
+            daily_limit=_int(os.environ.get("DAILY_LIMIT", ""), 5),
+            users_file=os.environ.get("USERS_FILE", "").strip() or "geobot_users.json",
+            queue_limit=_int(os.environ.get("QUEUE_LIMIT", ""), 20),
             ocr_space_key=os.environ.get("OCR_SPACE_KEY", "").strip(),
             ocr_language=os.environ.get("OCR_LANGUAGE", "rus").strip() or "rus",
             gemini_api_key=os.environ.get("GEMINI_API_KEY", "").strip(),

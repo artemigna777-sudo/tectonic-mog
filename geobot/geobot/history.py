@@ -23,7 +23,7 @@ def distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 
 
 class History:
-    def __init__(self, path: str | Path, limit: int = 1000):
+    def __init__(self, path: str | Path, limit: int = 3000):
         self.path = Path(path)
         self.limit = limit
         self.items: dict[str, dict] = {}
@@ -83,8 +83,9 @@ class History:
         return (f"Подсказка из истории: раньше фото этого пользователя с известным ответом оказывались здесь: {top}. "
                 "Это лишь вероятность заранее — фото может быть из поездки; улики в кадре важнее.")
 
-    def stats(self) -> dict:
-        done = [v for v in self.items.values() if v.get("truth")]
+    def stats(self, chat: int | None = None) -> dict:
+        """Accuracy over this chat's answered photos, or over everyone's when chat is None."""
+        done = [v for v in self.items.values() if v.get("truth") and (chat is None or v.get("chat") == chat)]
         errors = sorted(v["error_km"] for v in done if v.get("error_km") is not None)
         top5 = [min(v["candidate_errors"]) for v in done if v.get("candidate_errors")]
         return {

@@ -12,6 +12,7 @@ from geobot.history import History, distance_km
 from geobot.imaging import crop_boxes
 from geobot.report import dossier, summary
 from geobot.services import YandexResult, parse_yandex, search_links
+from geobot.users import Users
 from geobot.textclues import find_clues, geocode_queries, place_phrases
 
 
@@ -211,7 +212,7 @@ def test_bot_flow_photo_and_access(tmp_path):
     from geobot.bot import GeoBot
 
     tg = FakeTG(jpeg_with_gps())
-    bot = GeoBot(CFG, None, tg=tg, svc=FakeSvc(), history=History(tmp_path / "h.json"))
+    bot = GeoBot(CFG, None, tg=tg, svc=FakeSvc(), history=History(tmp_path / "h.json"), users=Users(tmp_path / "hu.json"))
     asyncio.run(bot.handle({"update_id": 1, "message": {"message_id": 5, "chat": {"id": 1}, "from": {"id": 1},
                                                          "document": {"file_id": "f", "mime_type": "image/jpeg"}}}))
     methods = [m for m, _ in tg.calls]
@@ -225,7 +226,7 @@ def test_bot_flow_photo_and_access(tmp_path):
     assert "Где снято это фото" in tg.calls[-2][1]["text"]
 
     tg2 = FakeTG()
-    stranger = GeoBot(CFG, None, tg=tg2, svc=FakeSvc(), history=History(tmp_path / "h2.json"))
+    stranger = GeoBot(CFG, None, tg=tg2, svc=FakeSvc(), history=History(tmp_path / "h2.json"), users=Users(tmp_path / "h2u.json"))
     asyncio.run(stranger.handle({"update_id": 3, "message": {"message_id": 1, "chat": {"id": 7}, "from": {"id": 7},
                                                               "photo": [{"file_id": "x"}]}}))
     assert len(tg2.calls) == 1 and "закрытый" in tg2.calls[0][1]["text"]
@@ -444,7 +445,7 @@ def test_bot_answer_command_location_and_stats(tmp_path):
 
     tg = FakeTG(jpeg_with_gps())
     svc = FakeSvc(geo={"Дубровка, Зеленодольский район": (55.85, 48.52, "Дубровка, Зеленодольский район, Татарстан")})
-    bot = GeoBot(CFG, None, tg=tg, svc=svc, history=History(tmp_path / "h.json"))
+    bot = GeoBot(CFG, None, tg=tg, svc=svc, history=History(tmp_path / "h.json"), users=Users(tmp_path / "hu.json"))
     msg = {"message_id": 5, "chat": {"id": 1}, "from": {"id": 1}}
     asyncio.run(bot.handle({"update_id": 1, "message": {**msg, "document": {"file_id": "f", "mime_type": "image/jpeg"}}}))
     asyncio.run(bot.handle({"update_id": 2, "message": {**msg, "message_id": 8, "text": "/ответ Дубровка, Зеленодольский район",
@@ -593,3 +594,87 @@ def test_gemini_prompt_has_highways_and_brands():
     from geobot.gemini import META
 
     assert "М-7 «Волга»" in META and "«бахетле»" in META and "Калининградская область" in META
+
+
+def test_public_mode_admins_and_limits(monkeypatch):
+    monkeypatch.setenv("BOT_TOKEN", "1:x")
+    monkeypatch.setenv("ALLOWED_USERS", "*")
+    monkeypatch.setenv("ADMIN_USERS", "42")
+    monkeypatch.delenv("DAILY_LIMIT", raising=False)
+    cfg = Config.from_env()
+    assert cfg.public and cfg.admins == {42} and cfg.daily_limit == 5 and cfg.allowed(7) and not cfg.allowed(None)
+    monkeypatch.setenv("ALLOWED_USERS", "1502566438")
+    monkeypatch.delenv("ADMIN_USERS")
+    cfg = Config.from_env()
+    assert not cfg.public and cfg.admins == {1502566438} and not cfg.allowed(7)
+
+
+def _photo(uid, mid):
+    return {"update_id": mid, "message": {"message_id": mid, "chat": {"id": uid}, "from": {"id": uid, "username": "u"},
+                                          "document": {"file_id": "f", "mime_type": "image/jpeg"}}}
+
+
+def _text(uid, text):
+    return {"update_id": 1, "message": {"message_id": 1, "chat": {"id": uid}, "from": {"id": uid}, "text": text}}
+
+
+def test_daily_limit_ban_and_admin_stats(tmp_path):
+    from geobot.bot import GeoBot
+
+    cfg = Config(bot_token="1:x", public=True, admins={42}, daily_limit=2)
+    tg = FakeTG(jpeg_with_gps())
+    users = Users(tmp_path / "u.json")
+    bot = GeoBot(cfg, None, tg=tg, svc=FakeSvc(), history=History(tmp_path / "h.json"), users=users)
+    for i in range(3):
+        asyncio.run(bot.handle(_photo(7, 10 + i)))
+    assert "Лимит 2 фото в день исчерпан" in tg.calls[-1][1]["text"]
+    assert users.used_today(7) == 2 and Users(tmp_path / "u.json").used_today(7) == 2  # saved to disk
+    for i in range(3):  # the admin has no limit
+        asyncio.run(bot.handle(_photo(42, 20 + i)))
+    assert users.used_today(42) == 3
+
+    asyncio.run(bot.handle(_text(7, "/ban 42")))  # not an admin: just help
+    assert "Пришлите фото" in tg.calls[-1][1]["text"] and "сегодня осталось 0" in tg.calls[-1][1]["text"]
+    asyncio.run(bot.handle(_text(42, "/ban 7")))
+    assert "забанен" in tg.calls[-1][1]["text"]
+    asyncio.run(bot.handle(_text(7, "/stats")))
+    assert tg.calls[-1][1]["text"] == "Доступ к боту закрыт."
+    asyncio.run(bot.handle(_text(42, "/admin")))
+    text = tg.calls[-1][1]["text"]
+    assert "Сегодня: 2 чел., 5 фото" in text and "<code>7</code> @u — 2" in text and "В бане" in text
+    asyncio.run(bot.handle(_text(42, "/unban 7")))
+    assert not users.is_banned(7)
+    asyncio.run(bot.handle(_text(42, "/ban 42")))
+    assert "нельзя" in tg.calls[-1][1]["text"]
+
+
+def test_failed_analysis_is_not_counted_and_queue_position_is_shown(tmp_path):
+    from geobot.bot import GeoBot
+
+    class BrokenTG(FakeTG):
+        async def download(self, file_id):
+            raise RuntimeError("boom")
+
+    cfg = Config(bot_token="1:x", public=True, daily_limit=5)
+    tg = BrokenTG()
+    bot = GeoBot(cfg, None, tg=tg, svc=FakeSvc(), history=History(tmp_path / "h.json"), users=Users(tmp_path / "u.json"))
+    asyncio.run(bot.handle(_photo(7, 1)))
+    assert bot.users.used_today(7) == 0 and "не засчитана" in tg.calls[-1][1]["text"] and bot.queued == 0
+
+    tg = FakeTG(jpeg_with_gps())
+    bot = GeoBot(cfg, None, tg=tg, svc=FakeSvc(), history=History(tmp_path / "h.json"), users=Users(tmp_path / "u.json"))
+
+    async def two():
+        await asyncio.gather(bot.handle(_photo(7, 1)), bot.handle(_photo(8, 2)))
+
+    asyncio.run(two())
+    texts = [p["text"] for m, p in tg.calls if m == "sendMessage"]
+    assert any("перед вами 1 фото" in t for t in texts) and bot.queued == 0
+
+
+def test_stats_are_per_user(tmp_path):
+    h = History(tmp_path / "h.json")
+    h.add("1:1", {"chat": 1, "best": {"lat": 55.79, "lon": 49.12, "label": "Казань"}, "candidates": []})
+    h.add("2:1", {"chat": 2, "best": {"lat": 55.79, "lon": 49.12, "label": "Казань"}, "candidates": []})
+    h.set_truth("1:1", 55.79, 49.12, "Казань")
+    assert h.stats(1)["answered"] == 1 and h.stats(2)["answered"] == 0 and h.stats()["answered"] == 1

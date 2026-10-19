@@ -5,3 +5,4 @@ geobot_history.json
 *.tmp
 geobot/data/ru_places.sqlite
 geobot/data/*.tmp
+geobot_users.json

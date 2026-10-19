@@ -16,6 +16,7 @@ from .history import History
 from .report import dossier, summary
 from .services import Services
 from .telegram import Telegram
+from .users import Users
 
 log = logging.getLogger(__name__)
 MAX_FILE = 20 * 1024 * 1024  # Bot API download limit
@@ -32,14 +33,20 @@ HELP = (
     "/stats — точность бота по вашим ответам\n"
     "/id — показать ваш Telegram ID"
 )
+ADMIN_HELP = (
+    "\n\nКоманды владельца:\n"
+    "/admin — сколько людей и фото, кто сколько прислал сегодня\n"
+    "/ban ID — запретить пользоваться ботом, /unban ID — вернуть доступ"
+)
 ANSWER_RE = re.compile(r"^/(ответ|answer|otvet)(@\w+)?\s*", re.I)
+ADMIN_RE = re.compile(r"^/(admin|ban|unban)(@\w+)?(?:\s+|$)", re.I)
 COORDS_RE = re.compile(r"^\s*(-?\d{1,2}(?:[.,]\d+)?)\s*[,; ]\s*(-?\d{1,3}(?:[.,]\d+)?)\s*$")
 
 
 class GeoBot:
     def __init__(self, cfg: Config, http: aiohttp.ClientSession, tg: Telegram | None = None,
                  svc: Services | None = None, gemini: Gemini | None = None, history: History | None = None,
-                 gaz: Gazetteer | None = None):
+                 gaz: Gazetteer | None = None, users: Users | None = None):
         self.cfg = cfg
         self.http = http
         self.tg = tg or Telegram(http, cfg.bot_token)
@@ -48,8 +55,10 @@ class GeoBot:
             Gemini(http, cfg.gemini_api_key, cfg.gemini_models, cfg.gemini_lite_models, cfg.gemini_search)
             if cfg.gemini_enabled else None)
         self.history = history or History(cfg.history_file)
+        self.users = users or Users(cfg.users_file)
         self.gaz = gaz or Gazetteer()
         self.busy = asyncio.Semaphore(1)  # one photo at a time: a 12 MP original needs ~150 MB of the 256 MB
+        self.queued = 0  # photos waiting for or holding self.busy
         self.dossiers: OrderedDict[str, str] = OrderedDict()
         self.tasks: set[asyncio.Task] = set()
 
@@ -69,8 +78,12 @@ class GeoBot:
     async def run(self) -> None:
         await self.tg.call("deleteWebhook", drop_pending_updates=True)
         await self.ensure_gazetteer()
-        log.info("bot started; allowed users: %s; gemini: %s", sorted(self.cfg.allowed_users) or "nobody",
+        who = "everyone" if self.cfg.public else sorted(self.cfg.allowed_users | self.cfg.admins) or "nobody"
+        log.info("bot started; allowed users: %s; admins: %s; daily limit: %s; gemini: %s", who,
+                 sorted(self.cfg.admins) or "none", self.cfg.daily_limit or "off",
                  ", ".join(self.cfg.gemini_models) if self.gemini else "off")
+        if self.cfg.public and not self.cfg.admins:
+            log.warning("public mode without ADMIN_USERS: nobody can /ban, and your own photos count against the limit")
         offset = 0
         while True:
             try:
@@ -99,14 +112,19 @@ class GeoBot:
         text = msg.get("text") or ""
         if text.startswith("/id"):
             return await self.tg.send(chat, f"Ваш Telegram ID: <code>{uid}</code>")
-        if uid not in self.cfg.allowed_users:
+        admin = uid in self.cfg.admins
+        if not admin and uid is not None and self.users.is_banned(uid):
+            return await self.tg.send(chat, "Доступ к боту закрыт.")
+        if not self.cfg.allowed(uid):
             return await self.tg.send(chat, f"Этот бот закрытый. Ваш ID: <code>{uid}</code> — "
                                             "попросите владельца добавить его в ALLOWED_USERS.")
+        if admin and (cmd := ADMIN_RE.match(text)):
+            return await self.on_admin(chat, cmd.group(1).lower(), text[cmd.end():].strip())
         answer = ANSWER_RE.match(text)
         if answer or msg.get("location"):
             return await self.on_answer(msg, text[answer.end():].strip() if answer else "")
         if text.startswith("/stats"):
-            return await self.tg.send(chat, self.stats_text())
+            return await self.tg.send(chat, self.stats_text(chat))
         if msg.get("photo"):
             p = msg["photo"][-1]
             return await self.process(msg, p["file_id"], p.get("file_size"), compressed=True)
@@ -116,26 +134,97 @@ class GeoBot:
             if (doc.get("mime_type") or "").startswith("image/") or name.endswith(IMAGE_EXT):
                 return await self.process(msg, doc["file_id"], doc.get("file_size"), compressed=False)
             return await self.tg.send(chat, "Это не похоже на фото. Пришлите JPG, PNG или HEIC.")
-        await self.tg.send(chat, HELP)
+        limit = "" if admin or not self.cfg.daily_limit else \
+            f"\n\nЛимит: {self.cfg.daily_limit} фото в день, сегодня осталось {self._left(uid)}."
+        await self.tg.send(chat, HELP + limit + (ADMIN_HELP if admin else ""))
+
+    def _left(self, uid: int) -> int:
+        return max(0, self.cfg.daily_limit - self.users.used_today(uid))
+
+    async def on_admin(self, chat: int, cmd: str, arg: str) -> None:
+        if cmd == "admin":
+            return await self.tg.send(chat, self.admin_text())
+        target = int(arg) if arg.lstrip("-").isdigit() else None
+        if target is None:
+            return await self.tg.send(chat, f"Укажите ID: <code>/{cmd} 123456789</code>. "
+                                            "ID видно в /admin.")
+        if cmd == "ban":
+            if target in self.cfg.admins:
+                return await self.tg.send(chat, "Это администратор, его нельзя забанить.")
+            done = self.users.ban(target)
+            return await self.tg.send(chat, f"🚫 {target} забанен." if done else f"{target} уже в бане.")
+        done = self.users.unban(target)
+        await self.tg.send(chat, f"✅ {target} снова может пользоваться ботом." if done else f"{target} не был забанен.")
+
+    def admin_text(self) -> str:
+        st = self.users.stats()
+        mode = "открыт для всех" if self.cfg.public else "только для списка ALLOWED_USERS"
+        lines = [f"👥 <b>Бот {mode}</b>",
+                 f"Сегодня: {st['users_today']} чел., {st['photos_today']} фото",
+                 f"За 7 дней: {st['users_week']} чел.",
+                 f"Всего: {st['users_total']} чел., {st['photos_total']} фото",
+                 f"Лимит: {self.cfg.daily_limit or 'нет'} фото в день на человека · в очереди сейчас: {self.queued}"]
+        if st["top_today"]:
+            lines.append("\n<b>Сегодня прислали:</b>")
+            for uid, n in st["top_today"]:
+                name = self.users.name(uid)
+                lines.append(f"• <code>{uid}</code>{' ' + escape(name) if name else ''} — {n}")
+        if st["banned"]:
+            lines.append("\n🚫 В бане: " + ", ".join(f"<code>{u}</code>" for u in st["banned"]))
+        acc = self.history.stats()
+        if acc["answered"]:
+            lines.append(f"\n📊 Точность по всем пользователям: {acc['answered']} ответов"
+                         + (f", медианная ошибка {_fmt_km(acc['median_km'])}" if acc["median_km"] is not None else ""))
+        if self.gemini and getattr(self.gemini, "last_error", ""):
+            lines.append("\n⚠️ Gemini: " + escape(str(self.gemini.last_error)[:300]))
+        return "\n".join(lines)
 
     async def process(self, msg: dict, file_id: str, size: int | None, compressed: bool) -> None:
         chat = msg["chat"]["id"]
         if size and size > MAX_FILE:
             return await self.tg.send(chat, "Файл больше 20 МБ — Telegram не даёт ботам скачивать такие. Пришлите поменьше.")
-        status = await self.tg.send(chat, "⏳ Анализирую фото, это займёт до минуты…")
+        user = msg.get("from") or {}
+        uid = user.get("id")
+        limited = uid not in self.cfg.admins and self.cfg.daily_limit > 0
+        if limited and self._left(uid) <= 0:
+            return await self.tg.send(chat, f"Лимит {self.cfg.daily_limit} фото в день исчерпан. "
+                                            "Приходите завтра — счётчик обнуляется в полночь по Москве.")
+        if self.queued >= self.cfg.queue_limit and uid not in self.cfg.admins:
+            return await self.tg.send(chat, "Сейчас слишком много фото в очереди. Попробуйте через несколько минут.")
+        name = "@" + user["username"] if user.get("username") else user.get("first_name", "")
+        self.users.count(uid, name)
+        log.info("photo from %s (%s)", uid, name)
+        ahead = self.queued
+        self.queued += 1
+        try:
+            if not await self._process(msg, file_id, compressed, chat, ahead):
+                self.users.count(uid, n=-1)  # a failed analysis does not use up the limit
+        finally:
+            self.queued -= 1
+
+    async def _process(self, msg: dict, file_id: str, compressed: bool, chat: int, ahead: int) -> bool:
+        if ahead:
+            status = await self.tg.send(chat, f"🕒 Вы в очереди: перед вами {ahead} фото "
+                                              f"(примерно {ahead} мин.). Начну сам, ничего не нажимайте.")
+        else:
+            status = await self.tg.send(chat, "⏳ Анализирую фото, это займёт до минуты…")
 
         async def progress(text: str) -> None:
             await self.tg.edit(chat, status["message_id"], text)
 
         prior = self.history.prior_hint(chat) if self.cfg.history_hint else ""
         async with self.busy:
+            if ahead:
+                await progress("⏳ Ваша очередь, анализирую фото…")
             try:
                 data = await self.tg.download(file_id)
                 rep = await analyze(data, compressed, self.svc, self.gemini, progress, self.gaz, prior)
                 del data
             except Exception:
                 log.exception("analysis failed")
-                return await self.tg.edit(chat, status["message_id"], "Что-то пошло не так при анализе. Попробуйте ещё раз.")
+                await self.tg.edit(chat, status["message_id"], "Что-то пошло не так при анализе. Попробуйте ещё раз — "
+                                                               "эта попытка не засчитана в лимит.")
+                return False
 
         key = f"{chat}:{msg['message_id']}"
         self.dossiers[key] = dossier(rep)
@@ -166,6 +255,7 @@ class GeoBot:
                     await self.tg.call("sendMediaGroup", chat_id=chat, media=media)
             except Exception as e:  # Telegram may refuse to fetch some URLs
                 log.warning("commons media failed: %s", e)
+        return True
 
     async def on_answer(self, msg: dict, text: str) -> None:
         chat = msg["chat"]["id"]
@@ -198,11 +288,11 @@ class GeoBot:
         if errs:
             i = min(range(len(errs)), key=errs.__getitem__)
             lines.append(f"Ближайший из кандидатов Gemini — №{i + 1}, в {_fmt_km(errs[i])} от правильного места.")
-        lines.append("\n" + self.stats_text())
+        lines.append("\n" + self.stats_text(chat))
         await self.tg.send(chat, "\n".join(lines))
 
-    def stats_text(self) -> str:
-        st = self.history.stats()
+    def stats_text(self, chat: int | None = None) -> str:
+        st = self.history.stats(chat)
         if not st["answered"]:
             return "📊 Пока нет ни одного фото с правильным ответом. После анализа ответьте: /ответ город, улица"
         lines = [f"📊 <b>Точность</b> по {st['answered']} фото с правильным ответом:"]
