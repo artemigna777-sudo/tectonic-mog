@@ -28,7 +28,7 @@ class Config:
     ocr_space_key: str = ""
     ocr_language: str = "rus"
     gemini_api_key: str = ""
-    gemini_model: str = "gemini-2.5-flash"
+    gemini_model: str = "gemini-3.8-flash"
     contact: str = "geobot"
 
     @property
@@ -46,6 +46,6 @@ class Config:
             ocr_space_key=os.environ.get("OCR_SPACE_KEY", "").strip(),
             ocr_language=os.environ.get("OCR_LANGUAGE", "rus").strip() or "rus",
             gemini_api_key=os.environ.get("GEMINI_API_KEY", "").strip(),
-            gemini_model=os.environ.get("GEMINI_MODEL", "gemini-2.5-flash").strip() or "gemini-2.5-flash",
+            gemini_model=os.environ.get("GEMINI_MODEL", "gemini-3.8-flash").strip() or "gemini-3.8-flash",
             contact=os.environ.get("CONTACT", "geobot").strip() or "geobot",
         )
