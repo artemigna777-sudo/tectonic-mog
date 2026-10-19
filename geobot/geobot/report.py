@@ -59,6 +59,9 @@ def summary(rep: Report) -> str:
         where = ", ".join(str(g[k]) for k in ("place", "city", "region", "country") if g.get(k) and str(g[k]) != "null")
         out.append(f"\n🤖 <b>Gemini:</b> {escape(where or 'не уверен')} "
                    f"(уверенность {CONF.get(g.get('confidence'), '?')})")
+        if g.get("confidence_claimed"):
+            out.append(f"  ↳ Gemini считал уверенность {CONF.get(g['confidence_claimed'])}, но ни текст на фото, "
+                       "ни поиск по картинке этого не подтверждают — поэтому это лишь догадка, точку по ней не ставлю.")
         for c in (g.get("clues") or [])[:6]:
             out.append(f"• {escape(str(c))}")
 

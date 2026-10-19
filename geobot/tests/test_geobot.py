@@ -252,3 +252,51 @@ def test_yandex_name_without_matching_region_is_ignored():
     svc = FakeSvc(ya_page=page, geo={"Ах Катя": (61.8, 30.7, "Катя, Сортавальский округ, Карелия, Россия")})
     rep = asyncio.run(analyze(plain_jpeg(), True, CFG, None, svc))
     assert rep.best is None
+
+
+GEMINI_CFG = Config(bot_token="1:x", allowed_users={1}, ocr_space_key="k", gemini_api_key="g")
+
+
+def run_with_gemini(monkeypatch, answer, svc):
+    import geobot.analyze as an
+
+    seen = {}
+
+    async def fake_gemini(session, key, model, jpeg, hints):
+        seen["hints"] = hints
+        return dict(answer)
+
+    monkeypatch.setattr(an, "ask_gemini", fake_gemini)
+    return asyncio.run(analyze(plain_jpeg(), True, GEMINI_CFG, None, svc)), seen
+
+
+LOOKALIKE_PAGE = YANDEX_PAGE.replace("церковь казанской иконы", "коттедж").replace("Старое Чурилино", "Лесная сказка")
+
+
+def test_unsupported_confident_gemini_is_downgraded_to_region(monkeypatch):
+    answer = {"place": "ЖК «Лесная сказка»", "city": "Красный Бор", "region": "Ярославская область",
+              "country": "Россия", "confidence": "high", "radius_km": 0.5}
+    svc = FakeSvc(ya_page=LOOKALIKE_PAGE, geo={"Ярославская область, Россия": (57.8, 39.5),
+                                                "ЖК «Лесная сказка», Красный Бор, Ярославская область, Россия": (57.6, 40.0)})
+    rep, seen = run_with_gemini(monkeypatch, answer, svc)
+    # lookalike pages are not shown to Gemini at all
+    assert "Лесная сказка" not in seen["hints"] and "похожие дома" in seen["hints"]
+    assert rep.gemini["confidence"] == "low" and rep.gemini["confidence_claimed"] == "high"
+    assert rep.best.label == "Ярославская область, Россия" and rep.best.radius_km >= 100
+    assert rep.best.confidence == "low"
+    assert "лишь догадка" in summary(rep)
+
+
+def test_gemini_backed_by_landmark_matches_keeps_its_confidence(monkeypatch):
+    answer = {"place": "Церковь Казанской иконы", "city": "Старое Чурилино", "region": "Татарстан",
+              "country": "Россия", "confidence": "high"}
+    q = "Церковь Казанской иконы, Старое Чурилино, Татарстан, Россия"
+    svc = FakeSvc(ya_page=YANDEX_PAGE, geo={q: (56.028, 49.730)})
+    rep, seen = run_with_gemini(monkeypatch, answer, svc)
+    assert "Старое Чурилино" in seen["hints"]
+    assert rep.gemini["confidence"] == "high" and rep.best.confidence == "high" and rep.best.radius_km == 0.5
+
+
+def test_noise_words_are_not_places():
+    sites = [{"title": "Продажа двухкомнатной квартиры, Быково", "url": f"https://s{i}.ru/x"} for i in range(3)]
+    assert all(p[0] != "Продажа" for p in place_phrases(sites))

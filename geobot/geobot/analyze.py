@@ -10,7 +10,7 @@ from .config import Config
 from .exif import PhotoMeta, jpeg_for_upload, read_meta
 from .gemini import ask_gemini
 from .services import Services, YandexResult, search_links
-from .textclues import Clue, find_clues, geocode_queries, is_landmark, place_phrases
+from .textclues import Clue, find_clues, geocode_queries, is_landmark, norm_latin, place_phrases
 
 log = logging.getLogger(__name__)
 
@@ -75,14 +75,32 @@ def _hints(meta: PhotoMeta, ocr_text: str, clues: list[Clue], ya: YandexResult |
         lines.append("Текст на фото (OCR): " + ocr_text.replace("\n", " | ")[:800])
     for c in clues:
         lines.append(f"Признак: {c.text} → {c.place}")
-    if ya and (ya.tags or ya.sites):
-        lines.append("Поиск по картинке в Яндексе (страницы с этим или очень похожим фото; "
-                     "совпадения названий на нескольких страницах — сильная улика, единичные могут быть ошибкой):")
+    if ya and ya.tags and not is_landmark(ya.tags):
+        # lookalike houses elsewhere only mislead the model, so their pages are not passed on
+        lines.append("Поиск по картинке в Яндексе не узнал достопримечательность (теги: " + "; ".join(ya.tags) +
+                     "). Найденные им страницы — похожие дома в других местах, они не указывают на место съёмки.")
+    elif ya and (ya.tags or ya.sites):
+        lines.append("Поиск по картинке в Яндексе (заголовки страниц с фото этого или похожего объекта; "
+                     "название, повторяющееся на нескольких разных сайтах, — сильная улика, единичное может быть ошибкой):")
         if ya.tags:
             lines.append("  теги Яндекса: " + "; ".join(ya.tags))
         for site in ya.sites[:10]:
             lines.append(f"  - {site['title']} {site['description'][:160]}".rstrip())
     return "\n".join(lines)
+
+
+def _gemini_supported(rep: "Report", g: dict) -> bool:
+    """Is Gemini's named place backed by something other than its own impression of the scene?"""
+    if rep.clues or sum(ch.isalpha() for ch in rep.ocr_text) >= 6:
+        return True  # text on the photo
+    ya = rep.yandex
+    if ya and ya.sites and is_landmark(ya.tags):
+        context = " " + norm_latin(" ".join(f"{s['title']} {s['description']}" for s in ya.sites)) + " "
+        for key in ("place", "city"):
+            name = norm_latin(str(g.get(key) or ""))
+            if len(name) >= 4 and f" {name} " in context:
+                return True
+    return False
 
 
 def _gemini_query(g: dict) -> str:
@@ -130,6 +148,8 @@ async def analyze(data: bytes, compressed: bool, cfg: Config, session: aiohttp.C
                              else f"Gemini: ошибка {g['error']}")
         elif g:
             rep.gemini = g
+            if g.get("confidence") in ("high", "medium") and not _gemini_supported(rep, g):
+                g["confidence_claimed"], g["confidence"] = g["confidence"], "low"
         else:
             rep.notes.append("Gemini не ответил.")
 
@@ -162,13 +182,7 @@ async def _pick_best(rep: Report, svc: Services) -> Best | None:
     if ya_best:
         return ya_best
 
-    # 3) Gemini's less certain guess of a concrete place
-    if g and g_conf == "low":
-        best = await _gemini_place(rep, svc, g, g_conf, country)
-        if best:
-            return best
-
-    # 4) An address or name read from the photo, searched inside the agreed country
+    # 3) An address or name read from the photo, searched inside the agreed country
     if country:
         cities = [c.place for c in rep.clues if c.level == "city"]
         for q in geocode_queries(rep.ocr_text):
@@ -181,12 +195,7 @@ async def _pick_best(rep: Report, svc: Services) -> Best | None:
                     conf = conf or ("medium" if len(hits) == 1 else "low")
                     return Best(float(h["lat"]), float(h["lon"]), full, 1.0, conf, "текст на фото + OpenStreetMap")
 
-    # 5) Gemini's own coordinates
-    lat, lon = _float(g.get("lat")), _float(g.get("lon"))
-    if lat is not None and lon is not None and -90 <= lat <= 90 and -180 <= lon <= 180:
-        return Best(lat, lon, _gemini_query(g) or "оценка Gemini", _float(g.get("radius_km")) or 50, g_conf, "оценка Gemini")
-
-    # 6) Strongest table clue (city / region), centre of that area
+    # 4) Strongest table clue (city / region), centre of that area
     for c in sorted(rep.clues, key=lambda c: (-c.weight, c.level != "city")):
         if c.level in ("city", "region") and "/" not in c.place:
             hits = await svc.geocode(c.place, country)
@@ -194,7 +203,25 @@ async def _pick_best(rep: Report, svc: Services) -> Best | None:
                 h = hits[0]
                 return Best(float(h["lat"]), float(h["lon"]), c.place, 15 if c.level == "city" else 150, "low",
                             f"справочник: {c.text}")
+
+    # 5) Gemini's unconfirmed guess: only the region, never a made-up street address
+    if g:
+        return await _gemini_region(svc, g, country)
     return None
+
+
+async def _gemini_region(svc: Services, g: dict, country: str) -> Best | None:
+    region, ctry = g.get("region"), g.get("country")
+    region = region if region and str(region).lower() != "null" else None
+    ctry = ctry if ctry and str(ctry).lower() != "null" else None
+    query = ", ".join(str(x) for x in (region, ctry) if x)
+    if not query:
+        return None
+    hits = await svc.geocode(query, country)
+    if not hits:
+        return None
+    radius = max(_float(g.get("radius_km")) or 0, 100 if region else 500)
+    return Best(float(hits[0]["lat"]), float(hits[0]["lon"]), query, radius, "low", "догадка Gemini без подтверждений")
 
 
 def _matches_context(display_name: str, phrase: str, context: str) -> bool:
