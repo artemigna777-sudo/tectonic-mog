@@ -73,6 +73,8 @@ def summary(rep: Report) -> str:
     if rep.ocr_text:
         text = rep.ocr_text.strip().replace("\n", " · ")
         out.append(f"\n📝 Текст на фото: <i>{escape(text[:300])}{'…' if len(text) > 300 else ''}</i>")
+    if rep.prior:
+        out.append("\n🧭 Учтены ваши прошлые ответы: " + escape(rep.prior.split("здесь: ")[-1].split(". ")[0]))
     if rep.notes:
         out.append("\n⚠️ " + "\n⚠️ ".join(escape(n) for n in rep.notes))
     out.append("\n✍️ Знаете, где это? Ответьте на это сообщение: <code>/ответ город, улица</code> "

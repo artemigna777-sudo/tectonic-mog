@@ -45,6 +45,7 @@ class Config:
     gemini_search: bool = False  # Search grounding is not in the free tier for Gemini 3 models
     contact: str = "geobot"
     history_file: str = "geobot_history.json"
+    history_hint: bool = True  # tell Gemini where this user's earlier photos turned out to be
 
     @property
     def gemini_enabled(self) -> bool:
@@ -68,4 +69,5 @@ class Config:
             gemini_search=os.environ.get("GEMINI_SEARCH", "0").strip().lower() in ("1", "yes", "on", "true"),
             contact=os.environ.get("CONTACT", "geobot").strip() or "geobot",
             history_file=os.environ.get("HISTORY_FILE", "").strip() or "geobot_history.json",
+            history_hint=os.environ.get("HISTORY_HINT", "1").strip().lower() not in ("0", "no", "off", "false"),
         )

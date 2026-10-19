@@ -2,7 +2,7 @@
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .data.ru_tables import AREA_CODES, PLATE_REGIONS
@@ -17,6 +17,7 @@ class Clue:
     level: str  # "country" | "region" | "city"
     weight: int  # 1 weak … 3 strong
     country: str = ""  # country the clue implies, when it implies exactly one
+    regions: list[str] = field(default_factory=list)  # Russian regions it points to (canonical names)
 
 
 # Letters that only a few alphabets use. Order matters: more specific first.

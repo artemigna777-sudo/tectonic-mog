@@ -5,6 +5,7 @@ import logging
 import math
 import os
 import time
+from collections import Counter
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -57,9 +58,9 @@ class History:
                     return k, v
         return max(mine, key=lambda kv: kv[1].get("ts", 0)) if mine else None
 
-    def set_truth(self, key: str, lat: float, lon: float, label: str) -> dict:
+    def set_truth(self, key: str, lat: float, lon: float, label: str, region: str | None = None) -> dict:
         rec = self.items[key]
-        rec["truth"] = {"lat": lat, "lon": lon, "label": label}
+        rec["truth"] = {"lat": lat, "lon": lon, "label": label, "region": region}
         best = rec.get("best")
         rec["error_km"] = distance_km(best["lat"], best["lon"], lat, lon) if best else None
         dists = [distance_km(c["lat"], c["lon"], lat, lon) for c in rec.get("candidates") or []
@@ -67,6 +68,20 @@ class History:
         rec["candidate_errors"] = dists
         self._save()
         return rec
+
+    def region_counts(self, chat: int) -> Counter:
+        """Where this user's photos turned out to be, by region of the true answers."""
+        return Counter(v["truth"]["region"] for v in self.items.values()
+                       if v.get("chat") == chat and (v.get("truth") or {}).get("region"))
+
+    def prior_hint(self, chat: int, minimum: int = 3) -> str:
+        counts = self.region_counts(chat)
+        total = sum(counts.values())
+        if total < minimum:
+            return ""
+        top = ", ".join(f"{r} — {n} из {total}" for r, n in counts.most_common(3))
+        return (f"Подсказка из истории: раньше фото этого пользователя с известным ответом оказывались здесь: {top}. "
+                "Это лишь вероятность заранее — фото может быть из поездки; улики в кадре важнее.")
 
     def stats(self) -> dict:
         done = [v for v in self.items.values() if v.get("truth")]

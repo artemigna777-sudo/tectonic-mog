@@ -18,9 +18,11 @@ from pathlib import Path
 
 import aiohttp
 
+from .knowledge import cheat_sheet
+
 log = logging.getLogger(__name__)
 ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-META = (Path(__file__).parent / "data" / "meta_ru.md").read_text(encoding="utf-8")
+META = (Path(__file__).parent / "data" / "meta_ru.md").read_text(encoding="utf-8") + cheat_sheet()
 
 LOCATE_PROMPT = """Найди на фото до 4 небольших участков с деталями, полезными для определения места съёмки:
 надписи и вывески, дорожные знаки, номера машин, столбы и фонари, бордюры и покрытие дороги, фасады и окна,

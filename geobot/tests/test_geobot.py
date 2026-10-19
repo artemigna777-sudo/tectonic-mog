@@ -496,3 +496,100 @@ def test_crop_search_results_are_kept_only_for_landmarks():
     gem = FakeGemini(None, boxes=[{"box_2d": [100, 100, 400, 400], "label": "знак"}])
     rep = asyncio.run(analyze(big.getvalue(), True, svc, gem))
     assert svc.yandex_calls == 2 and not any("Вилка" in s["title"] for s in rep.yandex.sites)
+
+
+# --- stage 2: settlement gazetteer, highways, brands, user prior -------------------------------
+
+def tiny_gazetteer(tmp_path):
+    from geobot.gazetteer import Gazetteer
+    from geobot.gazetteer_build import build
+
+    places = [  # name, ascii, alt names, lat, lon, admin1 (GeoNames), population
+        ("Kazan", "Kazan", "Казань,Казан", 55.79, 49.12, "73", 1243500),
+        ("Dubrovka", "Dubrovka", "Дубровка", 55.8674, 48.8056, "73", 0),
+        ("Dubrovka", "Dubrovka", "Дубровка", 57.1, 34.9, "77", 0),
+        ("Dubrovka", "Dubrovka", "Дубровка", 53.69, 33.50, "10", 8427),
+        ("Innopolis", "Innopolis", "Иннополис", 55.75, 48.75, "73", 96),
+        ("Moskva", "Moscow", "Москва", 55.75, 37.62, "48", 10381222),
+        ("Vladimir", "Vladimir", "Владимир", 56.13, 40.40, "83", 357024),
+        ("Nizhniy Novgorod", "Nizhniy Novgorod", "Нижний Новгород", 56.33, 44.0, "51", 1259013),
+        ("Cheboksary", "Cheboksary", "Чебоксары", 56.13, 47.25, "16", 492331),
+        ("Naberezhnye Chelny", "Naberezhnye Chelny", "Набережные Челны", 55.74, 52.41, "73", 509870),
+        ("Ufa", "Ufa", "Уфа,Ufа", 54.74, 55.97, "08", 1120547),
+        ("Zagorodnaya", "Zagorodnaya", "Загородная", 58.5, 31.3, "52", 0),
+    ]
+    lines = [f"{i}\t{n}\t{a}\t{alt}\t{lat}\t{lon}\tP\tPPL\tRU\t\t{adm}\t\t\t\t{pop}\t\t\t\t2026-01-01\n"
+             for i, (n, a, alt, lat, lon, adm, pop) in enumerate(places)]
+    lines.append("99\tVolga\tVolga\tВолга\t55\t49\tH\tSTM\tRU\t\t73\t\t\t\t0\t\t\t\t2026-01-01\n")  # a river: skipped
+    path = tmp_path / "places.sqlite"
+    assert build(lines, path) == len(places)
+    return Gazetteer(path)
+
+
+def test_gazetteer_lookup_nearest_and_region_aliases(tmp_path):
+    from geobot.gazetteer import regions_in
+
+    gaz = tiny_gazetteer(tmp_path)
+    assert gaz.biggest("казань")["name"] == "Казань"  # Russian spelling preferred over Tatar «Казан»
+    assert gaz.biggest("Уфа")["name"] == "Уфа"  # not the mixed-script «Ufа»
+    assert len(gaz.lookup("Дубровка")) == 3 and gaz.lookup("Волга") == []
+    assert gaz.nearest(55.85, 48.80)["region"] == "Республика Татарстан"
+    assert regions_in("Нижегородская обл.") == ["Нижегородская область"]
+    assert regions_in("Новгородская область") == ["Новгородская область"]
+    assert regions_in("Московская область") == ["Московская область"]
+    assert regions_in("Казань, Республика Татарстан") == ["Республика Татарстан"]
+
+
+def test_highway_and_brand_clues(tmp_path):
+    from geobot.knowledge import brand_clues, road_clues
+
+    gaz = tiny_gazetteer(tmp_path)
+    roads = road_clues("Указатель M-7 Казань 120 км, М-55, А-999", gaz)
+    assert roads[0].text == "трасса М-7 «Волга» на фото"
+    assert "Республика Татарстан" in roads[0].regions and "Чувашская Республика" in roads[0].regions
+    assert road_clues("старый знак М-55", gaz)[0].text.startswith("трасса Р-258")  # renumbered road
+    brands = brand_clues("АЗС ТАТНЕФТЬ, банкомат Ак Барс, ярче солнца")
+    assert [b.text for b in brands] == ["банк «ак барс»", "АЗС «татнефть»"]  # «ярче» without «!» is just a word
+    assert brands[0].regions == ["Республика Татарстан"]
+
+
+def test_settlement_names_intersect_with_other_clues(tmp_path):
+    from geobot.knowledge import place_name_clues
+
+    gaz = tiny_gazetteer(tmp_path)
+    clues, unique = place_name_clues("Дубровка\nул. Загородная", gaz, ["Республика Татарстан"])
+    assert len(clues) == 1 and "1 в регионе по другим уликам" in clues[0].place  # the street is skipped
+    assert unique["region"] == "Республика Татарстан" and unique["agreed"]
+    clues, unique = place_name_clues("Дубровка", gaz, [])
+    assert unique is None and "3" in clues[0].place  # three Dubrovkas, nothing to choose by
+    _, unique = place_name_clues("Добро пожаловать в Иннополис", gaz, [])
+    assert unique["word"] == "Иннополис" and unique["total"] == 1
+
+
+def test_analyze_uses_brand_region_to_pick_the_right_village(tmp_path):
+    gaz = tiny_gazetteer(tmp_path)
+    svc = FakeSvc("Дубровка\nАЗС Татнефть")
+    rep = asyncio.run(analyze(plain_jpeg(), True, svc, gaz=gaz))
+    assert rep.best.label == "Дубровка, Республика Татарстан" and rep.best.confidence == "medium"
+    assert (rep.best.lat, rep.best.lon) == (55.8674, 48.8056)
+    assert "справочник населённых пунктов" in rep.best.source
+    assert "1 в регионе по другим уликам" in summary(rep)
+
+
+def test_prior_from_history_reaches_gemini_and_reply(tmp_path):
+    h = History(tmp_path / "h.json")
+    for i in range(4):
+        h.add(f"1:{i}", {"chat": 1, "best": None, "candidates": []})
+        h.set_truth(f"1:{i}", 55.8, 48.8, "x", "Республика Татарстан" if i < 3 else "Москва")
+    hint = h.prior_hint(1)
+    assert "Республика Татарстан — 3 из 4" in hint and h.prior_hint(2) == ""
+    gem = FakeGemini({"candidates": [{"region": "Татарстан", "country": "Россия", "probability": 50}]})
+    rep = asyncio.run(analyze(plain_jpeg(), True, FakeSvc(), gem, prior=hint))
+    assert gem.seen["hints"].startswith("Подсказка из истории")
+    assert "Учтены ваши прошлые ответы: Республика Татарстан — 3 из 4, Москва — 1 из 4" in summary(rep)
+
+
+def test_gemini_prompt_has_highways_and_brands():
+    from geobot.gemini import META
+
+    assert "М-7 «Волга»" in META and "«бахетле»" in META and "Калининградская область" in META

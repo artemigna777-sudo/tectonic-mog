@@ -6,8 +6,10 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
 from .exif import PhotoMeta, jpeg_for_upload, read_meta
+from .gazetteer import Gazetteer
 from .gemini import Gemini
 from .imaging import crop_boxes
+from .knowledge import add_regions, brand_clues, place_name_clues, region_votes, road_clues
 from .services import Services, YandexResult, search_links
 from .textclues import Clue, find_clues, geocode_queries, is_landmark, norm_latin, place_phrases
 
@@ -46,6 +48,8 @@ class Report:
     address: str | None = None
     commons: list[dict] = field(default_factory=list)
     details: list[str] = field(default_factory=list)  # labels of the zoomed-in crops Gemini looked at
+    place_match: dict | None = None  # the one settlement left after intersecting a name on the photo with regions
+    prior: str = ""  # hint from the user's earlier answers, if used
     notes: list[str] = field(default_factory=list)
 
 
@@ -79,8 +83,9 @@ def _country_code(clues: list[Clue], gemini: dict | None) -> str:
     return top[0][0] if len(top) == 1 or top[0][1] > top[1][1] else ""
 
 
-def _hints(meta: PhotoMeta, ocr_text: str, clues: list[Clue], ya: YandexResult | None = None) -> str:
-    lines = []
+def _hints(meta: PhotoMeta, ocr_text: str, clues: list[Clue], ya: YandexResult | None = None,
+           prior: str = "") -> str:
+    lines = [prior] if prior else []
     if meta.taken_at:
         lines.append(f"Время съёмки по метаданным: {meta.taken_at} {meta.utc_offset or ''}".strip())
     if meta.direction is not None:
@@ -133,7 +138,7 @@ Progress = Callable[[str], Awaitable[None]]
 
 
 async def analyze(data: bytes, compressed: bool, svc: Services, gemini: Gemini | None = None,
-                  progress: Progress | None = None) -> Report:
+                  progress: Progress | None = None, gaz: Gazetteer | None = None, prior: str = "") -> Report:
     async def say(text: str) -> None:
         if progress:
             try:
@@ -142,7 +147,7 @@ async def analyze(data: bytes, compressed: bool, svc: Services, gemini: Gemini |
                 pass
 
     meta = read_meta(data)
-    rep = Report(meta=meta, compressed=compressed)
+    rep = Report(meta=meta, compressed=compressed, prior=prior)
     try:
         jpeg = await asyncio.to_thread(jpeg_for_upload, data)
     except Exception as e:
@@ -172,6 +177,13 @@ async def analyze(data: bytes, compressed: bool, svc: Services, gemini: Gemini |
     if rep.yandex and rep.yandex.ocr_text and rep.yandex.ocr_text not in rep.ocr_text:
         rep.ocr_text = (rep.ocr_text + "\n" + rep.yandex.ocr_text).strip()  # Yandex reads text on the photo too
     rep.clues = find_clues(rep.ocr_text)
+    if gaz and gaz.ready:
+        rep.clues += road_clues(rep.ocr_text, gaz) + brand_clues(rep.ocr_text)
+        add_regions(rep.clues, gaz)
+        votes = region_votes(rep.clues)
+        agreed = [r for r, v in votes.most_common(3) if v >= 1]
+        names, rep.place_match = place_name_clues(rep.ocr_text, gaz, agreed)
+        rep.clues += names
     if rep.yandex and rep.yandex.image_url:
         rep.image_url = rep.yandex.image_url  # public copy on Yandex's CDN works for Google Lens and Bing too
     else:
@@ -182,7 +194,7 @@ async def analyze(data: bytes, compressed: bool, svc: Services, gemini: Gemini |
 
     if gemini:
         await say("🤖 Gemini рассматривает фото и детали…")
-        g = await gemini.analyze(jpeg, crops, _hints(meta, rep.ocr_text, rep.clues, rep.yandex))
+        g = await gemini.analyze(jpeg, crops, _hints(meta, rep.ocr_text, rep.clues, rep.yandex, prior))
         if g:
             rep.gemini = g
             if g.get("confidence") in ("high", "medium") and not _gemini_supported(rep, g):
@@ -219,7 +231,15 @@ async def _pick_best(rep: Report, svc: Services) -> Best | None:
     if ya_best:
         return ya_best
 
-    # 3) An address or name read from the photo, searched inside the agreed country
+    # 3) A settlement name read on the photo that only one place in Russia (or in the agreed region) has
+    pm = rep.place_match
+    if pm:
+        conf = "medium" if pm["agreed"] or pm["total"] == 1 else "low"
+        return Best(pm["lat"], pm["lon"], f"{pm['word']}, {pm['region']}", 3.0 if pm["agreed"] else 5.0, conf,
+                    "надпись на фото + справочник населённых пунктов" +
+                    (" + совпадение региона с другими уликами" if pm["agreed"] else ""))
+
+    # 4) An address or name read from the photo, searched inside the agreed country
     if country:
         cities = [c.place for c in rep.clues if c.level == "city"]
         for q in geocode_queries(rep.ocr_text):
@@ -232,16 +252,16 @@ async def _pick_best(rep: Report, svc: Services) -> Best | None:
                     conf = conf or ("medium" if len(hits) == 1 else "low")
                     return Best(float(h["lat"]), float(h["lon"]), full, 1.0, conf, "текст на фото + OpenStreetMap")
 
-    # 4) Strongest table clue (city / region), centre of that area
+    # 5) Strongest table clue (city / region), centre of that area
     for c in sorted(rep.clues, key=lambda c: (-c.weight, c.level != "city")):
-        if c.level in ("city", "region") and "/" not in c.place:
+        if c.level in ("city", "region") and "/" not in c.place and ":" not in c.place:
             hits = await svc.geocode(c.place, country)
             if hits:
                 h = hits[0]
                 return Best(float(h["lat"]), float(h["lon"]), c.place, 15 if c.level == "city" else 150, "low",
                             f"справочник: {c.text}")
 
-    # 5) Gemini's unconfirmed guess: only the region, never a made-up street address
+    # 6) Gemini's unconfirmed guess: only the region, never a made-up street address
     if g:
         return await _gemini_region(svc, g, country)
     return None

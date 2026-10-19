@@ -10,6 +10,7 @@ import aiohttp
 
 from .analyze import analyze
 from .config import Config
+from .gazetteer import Gazetteer
 from .gemini import Gemini
 from .history import History
 from .report import dossier, summary
@@ -37,7 +38,8 @@ COORDS_RE = re.compile(r"^\s*(-?\d{1,2}(?:[.,]\d+)?)\s*[,; ]\s*(-?\d{1,3}(?:[.,]
 
 class GeoBot:
     def __init__(self, cfg: Config, http: aiohttp.ClientSession, tg: Telegram | None = None,
-                 svc: Services | None = None, gemini: Gemini | None = None, history: History | None = None):
+                 svc: Services | None = None, gemini: Gemini | None = None, history: History | None = None,
+                 gaz: Gazetteer | None = None):
         self.cfg = cfg
         self.http = http
         self.tg = tg or Telegram(http, cfg.bot_token)
@@ -46,12 +48,27 @@ class GeoBot:
             Gemini(http, cfg.gemini_api_key, cfg.gemini_models, cfg.gemini_lite_models, cfg.gemini_search)
             if cfg.gemini_enabled else None)
         self.history = history or History(cfg.history_file)
+        self.gaz = gaz or Gazetteer()
         self.busy = asyncio.Semaphore(1)  # one photo at a time: a 12 MP original needs ~150 MB of the 256 MB
         self.dossiers: OrderedDict[str, str] = OrderedDict()
         self.tasks: set[asyncio.Task] = set()
 
+    async def ensure_gazetteer(self) -> None:
+        if self.gaz.ready:
+            return
+        log.info("settlement database missing, downloading GeoNames and building it (about a minute)…")
+        try:
+            from .gazetteer_build import build_from
+
+            n = await asyncio.to_thread(build_from)
+            self.gaz = Gazetteer()
+            log.info("settlement database ready: %s places", n)
+        except Exception as e:  # the bot works without it, just with fewer clues
+            log.warning("could not build settlement database: %s", e)
+
     async def run(self) -> None:
         await self.tg.call("deleteWebhook", drop_pending_updates=True)
+        await self.ensure_gazetteer()
         log.info("bot started; allowed users: %s; gemini: %s", sorted(self.cfg.allowed_users) or "nobody",
                  ", ".join(self.cfg.gemini_models) if self.gemini else "off")
         offset = 0
@@ -110,10 +127,11 @@ class GeoBot:
         async def progress(text: str) -> None:
             await self.tg.edit(chat, status["message_id"], text)
 
+        prior = self.history.prior_hint(chat) if self.cfg.history_hint else ""
         async with self.busy:
             try:
                 data = await self.tg.download(file_id)
-                rep = await analyze(data, compressed, self.svc, self.gemini, progress)
+                rep = await analyze(data, compressed, self.svc, self.gemini, progress, self.gaz, prior)
                 del data
             except Exception:
                 log.exception("analysis failed")
@@ -169,7 +187,8 @@ class GeoBot:
             lat, lon, label = float(hits[0]["lat"]), float(hits[0]["lon"]), hits[0].get("display_name") or text
         else:
             return await self.tg.send(chat, "Напишите место после команды: <code>/ответ Казань, улица Баумана</code>")
-        rec = self.history.set_truth(key, lat, lon, label)
+        near = self.gaz.nearest(lat, lon)
+        rec = self.history.set_truth(key, lat, lon, label, near["region"] if near else None)
         lines = [f"✅ Записал правильный ответ: {escape(label[:150])}"]
         if rec.get("error_km") is not None:
             lines.append(f"Ошибка бота: <b>{_fmt_km(rec['error_km'])}</b> ({escape(rec['best']['label'][:80])})")
