@@ -164,7 +164,10 @@ async def analyze(data: bytes, compressed: bool, svc: Services, gemini: Gemini |
         # a facade or a sign searched on its own often finds what the whole frame does not
         await say("🔍 Ищу в Яндексе отдельные детали фото…")
         for extra in await asyncio.gather(*(svc.yandex(c) for _, c in crops[:2])):
-            rep.yandex = merge_yandex(rep.yandex, extra)
+            # a crop of a road sign finds pictures of road signs (and music albums); keep only crops
+            # in which Yandex recognised a building or monument
+            if extra and is_landmark(extra.tags):
+                rep.yandex = merge_yandex(rep.yandex, extra)
 
     if rep.yandex and rep.yandex.ocr_text and rep.yandex.ocr_text not in rep.ocr_text:
         rep.ocr_text = (rep.ocr_text + "\n" + rep.yandex.ocr_text).strip()  # Yandex reads text on the photo too

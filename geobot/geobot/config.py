@@ -17,7 +17,7 @@ def load_dotenv(path: Path) -> None:
         os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
 
 
-DEFAULT_MODELS = "gemini-3.8-flash,gemini-3.7-flash,gemini-3.6-flash,gemini-3-flash"
+DEFAULT_MODELS = "gemini-3.8-flash,gemini-3.7-flash,gemini-3.6-flash,gemini-3-flash-preview"
 DEFAULT_LITE_MODELS = "gemini-3.5-flash-lite,gemini-3.1-flash-lite"
 
 
@@ -42,7 +42,7 @@ class Config:
     gemini_api_key: str = ""
     gemini_models: list[str] = field(default_factory=lambda: _list(DEFAULT_MODELS))
     gemini_lite_models: list[str] = field(default_factory=lambda: _list(DEFAULT_LITE_MODELS))
-    gemini_search: bool = True
+    gemini_search: bool = False  # Search grounding is not in the free tier for Gemini 3 models
     contact: str = "geobot"
     history_file: str = "geobot_history.json"
 
@@ -65,7 +65,7 @@ class Config:
             gemini_models=_list(os.environ.get("GEMINI_MODEL", "") + "," +
                                 (os.environ.get("GEMINI_MODELS", "").strip() or DEFAULT_MODELS)),
             gemini_lite_models=_list(os.environ.get("GEMINI_LITE_MODELS", "").strip() or DEFAULT_LITE_MODELS),
-            gemini_search=os.environ.get("GEMINI_SEARCH", "1").strip().lower() not in ("0", "no", "off", "false"),
+            gemini_search=os.environ.get("GEMINI_SEARCH", "0").strip().lower() in ("1", "yes", "on", "true"),
             contact=os.environ.get("CONTACT", "geobot").strip() or "geobot",
             history_file=os.environ.get("HISTORY_FILE", "").strip() or "geobot_history.json",
         )

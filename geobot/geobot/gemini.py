@@ -97,14 +97,14 @@ def _image(jpeg: bytes) -> dict:
 
 class Gemini:
     def __init__(self, session: aiohttp.ClientSession, api_key: str, models: list[str], lite_models: list[str],
-                 search: bool = True):
+                 search: bool = False):
         self.http = session
         self.key = api_key
         self.models = models
         self.lite_models = lite_models
         self.search_ok = search
         self.blocked: dict[str, float] = {}  # model -> unix time until which it is out of quota / unavailable
-        self.last_error = ""
+        self.last_error = ""  # why the last generate() got no answer, per model
 
     def _available(self, models: list[str]) -> list[str]:
         now = time.time()
@@ -126,6 +126,9 @@ class Gemini:
         if lite:  # if every Lite model is out, the bigger ones can do the small job too
             chain += [m for m in self._available(self.models) if m not in chain]
         plain = [{"text": p["text"].replace(SEARCH_RULE, "")} if "text" in p else p for p in parts]
+        errors: list[str] = []
+        if not chain:
+            self.last_error = "у всех моделей закончился дневной лимит или они недоступны"
         for model in chain:
             for attempt_search in ([True, False] if search and self.search_ok else [False]):
                 try:
@@ -133,7 +136,7 @@ class Gemini:
                                                     search=attempt_search)
                 except Exception as e:
                     log.warning("gemini %s failed: %s", model, e)
-                    self.last_error = "нет связи"
+                    errors.append(f"{model} — нет связи")
                     break
                 if status == 200:
                     try:
@@ -149,26 +152,32 @@ class Gemini:
                         return parsed, {"model": model, "sources": sources[:5]}
                     if attempt_search:
                         continue  # retry the same model without search
+                    errors.append(f"{model} — непонятный ответ")
                     break
                 msg = (data.get("error") or {}).get("message", "") if isinstance(data, dict) else ""
-                if status == 400 and attempt_search:
-                    log.info("google search not available for %s: %s", model, msg[:150])
+                if attempt_search and status in (400, 403, 429):
+                    # free keys may have no Search grounding quota: that refusal says nothing about
+                    # the model itself, so switch search off and retry the same model without it
+                    log.warning("google search refused for %s (HTTP %s): %s", model, status, msg[:150])
                     self.search_ok = False
                     continue
                 if status == 429:
                     # the daily/minute distinction lives in error.details (quotaId "...PerDay...")
                     raw = json.dumps(data, ensure_ascii=False).lower()
                     delay = re.search(r'"retrydelay":\s*"(\d+)', raw)
-                    self.blocked[model] = (_next_pacific_midnight() if "perday" in raw or "per day" in raw
+                    daily = "perday" in raw or "per day" in raw
+                    self.blocked[model] = (_next_pacific_midnight() if daily
                                            else time.time() + (int(delay.group(1)) + 5 if delay else 65))
-                    self.last_error = "закончился бесплатный лимит"
+                    errors.append(f"{model} — {'дневной' if daily else 'минутный'} лимит")
                 elif status in (403, 404):
                     self.blocked[model] = time.time() + 24 * 3600  # model not available for this key
-                    self.last_error = f"модель {model} недоступна"
+                    errors.append(f"{model} — нет такой модели или нет доступа")
                 else:
-                    self.last_error = f"HTTP {status}: {msg[:120]}"
-                log.warning("gemini %s HTTP %s: %s", model, status, msg[:200])
+                    errors.append(f"{model} — HTTP {status}: {msg[:100]}")
+                log.warning("gemini %s HTTP %s: %s", model, status, msg[:300])
                 break
+        if errors:
+            self.last_error = "; ".join(errors)
         return None, {}
 
     async def locate_details(self, jpeg: bytes) -> list[dict]:

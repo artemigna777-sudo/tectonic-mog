@@ -365,31 +365,38 @@ def ok(text, chunks=()):
                                  "groundingMetadata": {"groundingChunks": [{"web": c} for c in chunks]}}]}
 
 
-def test_gemini_falls_back_to_next_model_and_drops_search_when_refused():
+def test_gemini_falls_back_to_next_model_on_daily_quota():
     http = FakeHTTP({
         "m1": [(429, {"error": {"message": "Quota exceeded for metric: free_tier_requests, limit: 20", "details": [
             {"@type": "type.googleapis.com/google.rpc.QuotaFailure",
              "violations": [{"quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier"}]},
             {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "41s"}]}})],
-        "m2": [(400, {"error": {"message": "Search grounding is not supported"}}),
-               ok('{"candidates": [{"region": "Татарстан", "country": "Россия", "probability": 60}], "confidence": "low"}')],
+        "m2": [ok('{"candidates": [{"region": "Татарстан", "country": "Россия", "probability": 60}], "confidence": "low"}')],
     })
-    gem = Gemini(http, "k", ["m1", "m2"], ["lite"], search=True)
+    gem = Gemini(http, "k", ["m1", "m2"], ["lite"])
     g = asyncio.run(gem.analyze(b"jpeg", [("столб", b"crop")], "нет"))
     assert g["region"] == "Татарстан" and g["model"] == "m2"
-    assert http.calls == [("m1", True), ("m2", True), ("m2", False)]
-    assert "поиск Google" in http.prompts[0] and "поиск Google" not in http.prompts[2]
-    assert gem.search_ok is False and gem.blocked["m1"] - time.time() > 3600  # daily quota: blocked till reset
-    # m1 stays blocked until the daily reset, so the next photo goes straight to m2
+    assert http.calls == [("m1", False), ("m2", False)]
+    assert gem.blocked["m1"] - time.time() > 3600  # daily quota: blocked till the reset
+    # so the next photo goes straight to m2
     http.script["m2"] = [ok('{"candidates": [], "confidence": "low"}')]
     asyncio.run(gem.analyze(b"jpeg", [], "нет"))
     assert http.calls[-1] == ("m2", False)
 
 
+def test_unsupported_search_is_dropped_and_its_prompt_line_removed():
+    http = FakeHTTP({"m1": [(400, {"error": {"message": "Search grounding is not supported"}}),
+                            ok('{"candidates": [{"region": "Татарстан", "probability": 60}]}')]})
+    gem = Gemini(http, "k", ["m1"], [], search=True)
+    assert asyncio.run(gem.analyze(b"jpeg", [], "нет"))["region"] == "Татарстан"
+    assert http.calls == [("m1", True), ("m1", False)] and gem.search_ok is False
+    assert "поиск Google" in http.prompts[0] and "поиск Google" not in http.prompts[1]
+
+
 def test_gemini_keeps_google_sources_when_search_works():
     http = FakeHTTP({"m1": [ok('```json\n{"candidates": [{"region": "Татарстан", "probability": 50}]}\n```',
                                chunks=[{"title": "Дубровка — Википедия", "uri": "https://x"}])]})
-    g = asyncio.run(Gemini(http, "k", ["m1"], []).analyze(b"jpeg", [], "нет"))
+    g = asyncio.run(Gemini(http, "k", ["m1"], [], search=True).analyze(b"jpeg", [], "нет"))
     assert g["sources"][0]["title"].startswith("Дубровка")
 
 
@@ -450,3 +457,42 @@ def test_bot_answer_command_location_and_stats(tmp_path):
     asyncio.run(bot.handle({"update_id": 4, "message": {**msg, "message_id": 10, "text": "/answer 55.79, 49.12"}}))
     asyncio.run(bot.handle({"update_id": 5, "message": {**msg, "message_id": 11, "text": "/stats"}}))
     assert "по 1 фото" in tg.calls[-1][1]["text"]
+
+
+def test_search_quota_refusal_does_not_block_the_model():
+    # free keys answer 429 to Search grounding on Gemini 3: the model itself is fine
+    http = FakeHTTP({"m1": [(429, {"error": {"message": "Search grounding quota", "details": [
+                                {"violations": [{"quotaId": "SearchGroundingRequestsPerDay-FreeTier"}]}]}}),
+                            ok('{"candidates": [{"region": "Татарстан", "probability": 50}]}')]})
+    gem = Gemini(http, "k", ["m1"], [], search=True)
+    g = asyncio.run(gem.analyze(b"jpeg", [], "нет"))
+    assert g["region"] == "Татарстан" and "m1" not in gem.blocked and gem.search_ok is False
+    assert http.calls == [("m1", True), ("m1", False)]
+
+
+def test_all_failures_are_reported_per_model():
+    http = FakeHTTP({"a": [(404, {"error": {"message": "not found"}})],
+                     "b": [(429, {"error": {"message": "x", "details": [{"quotaId": "PerDay"}]}})]})
+    gem = Gemini(http, "k", ["a", "b"], [])
+    assert asyncio.run(gem.analyze(b"jpeg", [], "нет")) is None
+    assert gem.last_error == "a — нет такой модели или нет доступа; b — дневной лимит"
+    assert asyncio.run(gem.analyze(b"jpeg", [], "нет")) is None and "дневной лимит" in gem.last_error
+    assert Config(bot_token="1:x").gemini_search is False
+
+
+def test_crop_search_results_are_kept_only_for_landmarks():
+    big = io.BytesIO()
+    Image.new("RGB", (1200, 900), "gray").save(big, "JPEG")
+
+    class SignSvc(FakeSvc):
+        async def yandex(self, jpeg):
+            r = await super().yandex(jpeg)
+            if self.yandex_calls > 1:  # crops: a road sign found a music album
+                r.tags, r.sites = ["знаки пдд"], [{"title": "Помню в том апреле Вилка", "description": "",
+                                                    "url": "https://music.yandex.ru/x", "domain": "music.yandex.ru"}]
+            return r
+
+    svc = SignSvc(ya_page=LOOKALIKE_PAGE)
+    gem = FakeGemini(None, boxes=[{"box_2d": [100, 100, 400, 400], "label": "знак"}])
+    rep = asyncio.run(analyze(big.getvalue(), True, svc, gem))
+    assert svc.yandex_calls == 2 and not any("Вилка" in s["title"] for s in rep.yandex.sites)
