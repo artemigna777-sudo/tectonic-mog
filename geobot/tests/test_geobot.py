@@ -198,8 +198,8 @@ class FakeTG:
         self.calls.append((method, params))
         return {"message_id": 99}
 
-    async def send(self, chat_id, text, buttons=None):
-        return await self.call("sendMessage", chat_id=chat_id, text=text, buttons=buttons)
+    async def send(self, chat_id, text, buttons=None, keyboard=None):
+        return await self.call("sendMessage", chat_id=chat_id, text=text, buttons=buttons, keyboard=keyboard)
 
     async def edit(self, chat_id, message_id, text, buttons=None):
         return await self.call("editMessageText", chat_id=chat_id, text=text, buttons=buttons)
@@ -874,3 +874,56 @@ def test_packs_from_env_and_paid_photos_jump_the_queue():
         assert order == ["paid", "free"] and not q.busy
 
     asyncio.run(go())
+
+
+def test_menu_keyboard_buttons(tmp_path):
+    from geobot.bot import B_ADMIN, B_BALANCE, B_BUY, B_FIND, B_HELP, B_STATS, B_SUPPORT, GeoBot
+    from geobot.telegram import Telegram
+
+    cfg = Config(bot_token="1:x", public=True, admins={42}, daily_limit=3)
+    tg = ScriptedTG(jpeg_with_gps())
+    users = Users(tmp_path / "u.json")
+    bot = GeoBot(cfg, None, tg=tg, svc=FakeSvc(), history=History(tmp_path / "h.json"), users=users)
+    asyncio.run(bot.handle(_text(7, "/start")))
+    kb = tg.calls[-1][1]["keyboard"]
+    assert kb[0] == [B_FIND] and [B_BUY, B_BALANCE] in kb and B_ADMIN not in sum(kb, [])
+    asyncio.run(bot.handle(_text(42, "/start")))
+    assert [B_ADMIN] in tg.calls[-1][1]["keyboard"]
+
+    users.use_free(7)
+    users.add_credits(7, 4)
+    asyncio.run(bot.handle(_text(7, B_BALANCE)))
+    bal = tg.calls[-1][1]
+    assert "Бесплатно сегодня: 2 из 3" in bal["text"] and "Куплено фото: 4" in bal["text"]
+    asyncio.run(bot.handle(_cb(7, "shop")))
+    assert tg.calls[-1][1]["buttons"][0][0]["callback_data"] == "buy:1"
+    asyncio.run(bot.handle(_text(7, B_BUY)))
+    assert "Фото за звёзды" in tg.calls[-1][1]["text"]
+    asyncio.run(bot.handle(_text(7, B_FIND)))
+    assert "Пришлите фото" in tg.calls[-1][1]["text"]
+    asyncio.run(bot.handle(_text(7, B_STATS)))
+    assert "Пока нет ни одного фото" in tg.calls[-1][1]["text"]
+    asyncio.run(bot.handle(_text(7, B_HELP)))
+    assert "/buy" in tg.calls[-1][1]["text"]
+    asyncio.run(bot.handle(_text(7, B_SUPPORT)))
+    assert "Вопросы по оплате" in tg.calls[-1][1]["text"]
+    asyncio.run(bot.handle(_text(7, B_ADMIN)))  # not an admin: just help
+    assert "Пришлите фото" in tg.calls[-1][1]["text"] and "Сегодня:" not in tg.calls[-1][1]["text"]
+    asyncio.run(bot.handle(_text(42, B_ADMIN)))
+    assert "Сегодня:" in tg.calls[-1][1]["text"]
+
+    class Capture:  # the real client turns `keyboard` into a persistent reply keyboard
+        def __init__(self):
+            self.payload = None
+
+    real = Telegram(None, "1:x")
+    seen = Capture()
+
+    async def fake_call(method, **params):
+        seen.payload = params
+        return {}
+
+    real.call = fake_call
+    asyncio.run(real.send(1, "hi", keyboard=[["a", "b"]]))
+    assert seen.payload["reply_markup"]["keyboard"] == [[{"text": "a"}, {"text": "b"}]]
+    assert seen.payload["reply_markup"]["is_persistent"] and seen.payload["reply_markup"]["resize_keyboard"]

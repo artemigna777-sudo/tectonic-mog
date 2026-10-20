@@ -42,6 +42,16 @@ ADMIN_HELP = (
     "/refund КОД — вернуть звёзды за покупку (код платежа видно в /admin)"
 )
 JOINED = ("member", "administrator", "creator", "restricted")
+
+# Menu under the message field (instead of the phone keyboard)
+B_FIND, B_BUY, B_BALANCE, B_STATS, B_HELP, B_SUPPORT, B_ADMIN = (
+    "🔎 Найти место по фото", "⭐ Купить фото", "💰 Мой баланс", "📊 Моя точность", "❓ Помощь", "💬 Поддержка",
+    "🛠 Админка")
+COMMANDS = [("start", "Меню и помощь"), ("buy", "Купить фото за звёзды"), ("balance", "Мой баланс"),
+            ("stats", "Точность по моим ответам"), ("paysupport", "Вопросы по оплате")]
+FIND_TEXT = ("📸 Пришлите фото — я определю, где оно снято.\n\n"
+             "Лучше отправлять <b>файлом</b> (📎 → Файл): так сохраняются GPS и время съёмки, "
+             "и ответ бывает точным до метров.")
 ANSWER_RE = re.compile(r"^/(ответ|answer|otvet)(@\w+)?\s*", re.I)
 ADMIN_RE = re.compile(r"^/(admin|ban|unban|refund)(@\w+)?(?:\s+|$)", re.I)
 COORDS_RE = re.compile(r"^\s*(-?\d{1,2}(?:[.,]\d+)?)\s*[,; ]\s*(-?\d{1,3}(?:[.,]\d+)?)\s*$")
@@ -120,6 +130,10 @@ class GeoBot:
 
     async def run(self) -> None:
         await self.tg.call("deleteWebhook", drop_pending_updates=True)
+        try:  # the blue «Меню» button next to the message field
+            await self.tg.call("setMyCommands", commands=[{"command": c, "description": d} for c, d in COMMANDS])
+        except Exception as e:
+            log.warning("setMyCommands failed: %s", e)
         await self.ensure_gazetteer()
         who = "everyone" if self.cfg.public else sorted(self.cfg.allowed_users | self.cfg.admins) or "nobody"
         log.info("bot started; allowed users: %s; admins: %s; daily limit: %s; gemini: %s; fallback: %s", who,
@@ -163,7 +177,7 @@ class GeoBot:
         text = msg.get("text") or ""
         if msg.get("successful_payment"):  # money first: never lose a purchase to a later check
             return await self.on_paid(msg)
-        if text.startswith("/paysupport"):
+        if text == B_SUPPORT or text.startswith("/paysupport"):
             return await self.tg.send(chat, self.paysupport_text())
         if text.startswith("/id"):
             return await self.tg.send(chat, f"Ваш Telegram ID: <code>{uid}</code>")
@@ -173,8 +187,21 @@ class GeoBot:
         if not self.cfg.allowed(uid):
             return await self.tg.send(chat, f"Этот бот закрытый. Ваш ID: <code>{uid}</code> — "
                                             "попросите владельца добавить его в ALLOWED_USERS.")
+        if admin and text == B_ADMIN:
+            text = "/admin"
         if admin and (cmd := ADMIN_RE.match(text)):
             return await self.on_admin(chat, cmd.group(1).lower(), text[cmd.end():].strip())
+        if text in (B_HELP, "/help"):
+            return await self.tg.send(chat, HELP + (ADMIN_HELP if admin else ""), keyboard=self.menu(admin))
+        if text in (B_BALANCE, "/balance"):
+            return await self.send_balance(chat, uid, admin)
+        if text == B_FIND:
+            return await self.tg.send(chat, FIND_TEXT + self.balance_text(uid, admin),
+                                      await self.gate_buttons(uid) if not admin else None)
+        if text == B_STATS:
+            text = "/stats"
+        if text == B_BUY:
+            text = "/buy"
         wants = bool(msg.get("photo") or msg.get("document") or msg.get("location") or ANSWER_RE.match(text)
                      or text.startswith(("/stats", "/buy")))
         if wants and not admin and not await self.subscribed(uid):
@@ -195,8 +222,25 @@ class GeoBot:
             if (doc.get("mime_type") or "").startswith("image/") or name.endswith(IMAGE_EXT):
                 return await self.process(msg, doc["file_id"], doc.get("file_size"), compressed=False)
             return await self.tg.send(chat, "Это не похоже на фото. Пришлите JPG, PNG или HEIC.")
+        gate = await self.gate_buttons(uid) if not admin else None
         await self.tg.send(chat, HELP + self.balance_text(uid, admin) + (ADMIN_HELP if admin else ""),
-                           await self.gate_buttons(uid) if not admin else None)
+                           keyboard=self.menu(admin))
+        if gate:
+            await self.send_gate(chat)
+
+    def menu(self, admin: bool = False) -> list[list[str]]:
+        rows = [[B_FIND], [B_BUY, B_BALANCE] if self.cfg.packs else [B_BALANCE], [B_STATS, B_HELP], [B_SUPPORT]]
+        return rows + [[B_ADMIN]] if admin else rows
+
+    async def send_balance(self, chat: int, uid: int, admin: bool = False) -> None:
+        if admin or not self.cfg.daily_limit:
+            return await self.tg.send(chat, "💰 У вас нет лимита — присылайте сколько угодно фото.")
+        lines = [f"💰 <b>Ваш баланс</b>",
+                 f"Бесплатно сегодня: {self._left(uid)} из {self.cfg.daily_limit} (обновятся в полночь по Москве)"]
+        if self.cfg.packs:
+            lines.append(f"Куплено фото: {self.users.credits(uid)} (не сгорают)")
+        await self.tg.send(chat, "\n".join(lines),
+                           [[{"text": "⭐ Купить ещё", "callback_data": "shop"}]] if self.cfg.packs else None)
 
     def _left(self, uid: int) -> int:
         return max(0, self.cfg.daily_limit - self.users.free_used(uid))
@@ -268,7 +312,7 @@ class GeoBot:
         try:  # the bot may write to someone who asked to join for 5 minutes, even if they never started it
             await self.tg.send(req.get("user_chat_id") or uid,
                                f"✅ Заявка в канал получена — бот открыт! Пришлите фото: {self.cfg.daily_limit} "
-                               "в день бесплатно.")
+                               "в день бесплатно.", keyboard=self.menu())
         except Exception as e:
             log.warning("cannot greet %s: %s", uid, e)
 
@@ -544,9 +588,13 @@ class GeoBot:
         if data == "sub":
             if await self.subscribed(uid):
                 await self.tg.call("answerCallbackQuery", callback_query_id=cb["id"])
-                return await self.tg.send(chat, "✅ Готово, бот открыт! Пришлите фото." + self.balance_text(uid))
+                return await self.tg.send(chat, "✅ Готово, бот открыт! Пришлите фото." + self.balance_text(uid),
+                                          keyboard=self.menu(uid in self.cfg.admins))
             return await self.tg.call("answerCallbackQuery", callback_query_id=cb["id"], show_alert=True,
                                       text="Заявка пока не пришла. Нажмите «Подписаться на канал» и отправьте заявку.")
+        if data == "shop":
+            await self.tg.call("answerCallbackQuery", callback_query_id=cb["id"])
+            return await self.send_shop(chat, uid)
         if data.startswith("buy:") and data[4:].isdigit():
             await self.tg.call("answerCallbackQuery", callback_query_id=cb["id"])
             return await self.send_invoice(chat, int(data[4:]))

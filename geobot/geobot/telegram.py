@@ -30,9 +30,14 @@ class Telegram:
     def _markup(buttons: list[list[dict]] | None) -> dict | None:
         return {"inline_keyboard": buttons} if buttons else None
 
-    async def send(self, chat_id: int, text: str, buttons: list[list[dict]] | None = None) -> dict:
+    async def send(self, chat_id: int, text: str, buttons: list[list[dict]] | None = None,
+                   keyboard: list[list[str]] | None = None) -> dict:
+        """`buttons` — inline buttons under the message; `keyboard` — the menu that replaces the phone keyboard."""
+        markup = self._markup(buttons) or ({"keyboard": [[{"text": t} for t in row] for row in keyboard],
+                                            "resize_keyboard": True, "is_persistent": True,
+                                            "input_field_placeholder": "Пришлите фото…"} if keyboard else None)
         return await self.call("sendMessage", chat_id=chat_id, text=text, parse_mode="HTML",
-                               link_preview_options={"is_disabled": True}, reply_markup=self._markup(buttons))
+                               link_preview_options={"is_disabled": True}, reply_markup=markup)
 
     async def edit(self, chat_id: int, message_id: int, text: str, buttons: list[list[dict]] | None = None) -> None:
         await self.call("editMessageText", chat_id=chat_id, message_id=message_id, text=text, parse_mode="HTML",
