@@ -1,0 +1,8 @@
+{
+  "name": "geobot-promo",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "tsx": "^4.23.15"
+  }
+}
