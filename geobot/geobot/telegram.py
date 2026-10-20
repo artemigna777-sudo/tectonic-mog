@@ -24,7 +24,7 @@ class Telegram:
 
     async def get_updates(self, offset: int, poll: int = 50) -> list[dict]:
         return await self.call("getUpdates", http_timeout=poll + 15, offset=offset, timeout=poll,
-                               allowed_updates=["message", "callback_query"])
+                               allowed_updates=["message", "callback_query", "chat_join_request", "pre_checkout_query"])
 
     @staticmethod
     def _markup(buttons: list[list[dict]] | None) -> dict | None:

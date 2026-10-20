@@ -33,6 +33,22 @@ def _ids(raw: str) -> set[int]:
     return {int(x) for x in raw.replace(";", ",").split(",") if x.strip().isdigit()}
 
 
+DEFAULT_PACKS = ((1, 5), (10, 25), (50, 100))
+
+
+def _packs(raw: str) -> list[tuple[int, int]]:
+    """"1:5,10:25" -> [(1, 5), (10, 25)]; "0" or "off" turns paid photos off."""
+    raw = raw.strip()
+    if not raw:
+        return list(DEFAULT_PACKS)
+    out = []
+    for part in raw.replace(";", ",").split(","):
+        n, _, stars = part.partition(":")
+        if n.strip().isdigit() and stars.strip().isdigit() and int(n) > 0 and int(stars) > 0:
+            out.append((int(n), int(stars)))
+    return sorted(out)
+
+
 def _int(raw: str, default: int) -> int:
     raw = raw.strip()
     return int(raw) if raw.isdigit() else default
@@ -56,7 +72,11 @@ class Config:
     history_hint: bool = True  # tell Gemini where this user's earlier photos turned out to be
     public: bool = False  # ALLOWED_USERS=* — anyone may use the bot
     admins: set[int] = field(default_factory=set)  # no daily limit, may /ban and see /admin
-    daily_limit: int = 5  # photos per user per day (Moscow time); 0 — unlimited; admins are exempt
+    daily_limit: int = 3  # free photos per user per day (Moscow time); 0 — unlimited; admins are exempt
+    packs: list[tuple[int, int]] = field(default_factory=lambda: list(DEFAULT_PACKS))  # (photos, stars)
+    channel_id: str = ""  # users must ask to join this channel first (-100… or @name); empty — off
+    channel_link: str = ""  # invite link with join requests; empty — the bot creates one itself
+    support: str = ""  # who answers /paysupport, e.g. @username
     users_file: str = "geobot_users.json"
     queue_limit: int = 20  # photos waiting at once; more and new ones are turned away
 
@@ -80,7 +100,11 @@ class Config:
             public="*" in allowed,
             # without ADMIN_USERS the IDs listed in ALLOWED_USERS are the admins (the owner, in private mode)
             admins=_ids(os.environ.get("ADMIN_USERS", "")) or users,
-            daily_limit=_int(os.environ.get("DAILY_LIMIT", ""), 5),
+            daily_limit=_int(os.environ.get("DAILY_LIMIT", ""), 3),
+            packs=_packs(os.environ.get("PACKS", "")),
+            channel_id=os.environ.get("CHANNEL_ID", "").strip(),
+            channel_link=os.environ.get("CHANNEL_LINK", "").strip(),
+            support=os.environ.get("SUPPORT", "").strip(),
             users_file=os.environ.get("USERS_FILE", "").strip() or "geobot_users.json",
             queue_limit=_int(os.environ.get("QUEUE_LIMIT", ""), 20),
             ocr_space_key=os.environ.get("OCR_SPACE_KEY", "").strip(),

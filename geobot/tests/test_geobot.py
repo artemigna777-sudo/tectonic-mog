@@ -602,7 +602,7 @@ def test_public_mode_admins_and_limits(monkeypatch):
     monkeypatch.setenv("ADMIN_USERS", "42")
     monkeypatch.delenv("DAILY_LIMIT", raising=False)
     cfg = Config.from_env()
-    assert cfg.public and cfg.admins == {42} and cfg.daily_limit == 5 and cfg.allowed(7) and not cfg.allowed(None)
+    assert cfg.public and cfg.admins == {42} and cfg.daily_limit == 3 and cfg.allowed(7) and not cfg.allowed(None)
     monkeypatch.setenv("ALLOWED_USERS", "1502566438")
     monkeypatch.delenv("ADMIN_USERS")
     cfg = Config.from_env()
@@ -627,7 +627,8 @@ def test_daily_limit_ban_and_admin_stats(tmp_path):
     bot = GeoBot(cfg, None, tg=tg, svc=FakeSvc(), history=History(tmp_path / "h.json"), users=users)
     for i in range(3):
         asyncio.run(bot.handle(_photo(7, 10 + i)))
-    assert "Лимит 2 фото в день исчерпан" in tg.calls[-1][1]["text"]
+    assert "Бесплатные фото на сегодня закончились (2 в день" in tg.calls[-1][1]["text"]
+    assert tg.calls[-1][1]["buttons"][0][0]["callback_data"] == "buy:1"
     assert users.used_today(7) == 2 and Users(tmp_path / "u.json").used_today(7) == 2  # saved to disk
     for i in range(3):  # the admin has no limit
         asyncio.run(bot.handle(_photo(42, 20 + i)))
@@ -718,3 +719,158 @@ def test_fallback_alone_without_gemini_key():
     gem = Gemini(http, "", [], [], fallback_key="sk-or-x")
     assert asyncio.run(gem.analyze(plain_jpeg(), [], "нет"))["model"] == "moonshotai/kimi-k2.6:free"
     assert Config(bot_token="1:x", fallback_key="k").gemini_enabled
+
+
+
+class ScriptedTG(FakeTG):
+    """FakeTG with canned answers for some methods (an exception instance is raised)."""
+
+    def __init__(self, file=b"", answers=None):
+        super().__init__(file)
+        self.answers = answers or {}
+
+    async def call(self, method, **params):
+        self.calls.append((method, params))
+        ans = self.answers.get(method, {"message_id": 99})
+        if isinstance(ans, Exception):
+            raise ans
+        return ans(params) if callable(ans) else ans
+
+
+def _cb(uid, data, n=1):
+    return {"update_id": n, "callback_query": {"id": f"q{n}", "data": data, "from": {"id": uid},
+                                               "message": {"chat": {"id": uid}}}}
+
+
+def test_channel_join_request_opens_the_bot(tmp_path):
+    from geobot.bot import GeoBot
+
+    cfg = Config(bot_token="1:x", public=True, admins={42}, channel_id="-1001")
+    tg = ScriptedTG(jpeg_with_gps(), {"createChatInviteLink": {"invite_link": "https://t.me/+abc"},
+                                      "getChatMember": {"status": "left"}})
+    users = Users(tmp_path / "u.json")
+    bot = GeoBot(cfg, None, tg=tg, svc=FakeSvc(), history=History(tmp_path / "h.json"), users=users)
+    asyncio.run(bot.handle(_photo(7, 1)))
+    gate = tg.calls[-1][1]
+    assert "подпишитесь на наш канал" in gate["text"] and gate["buttons"][0][0]["url"] == "https://t.me/+abc"
+    assert ("createChatInviteLink", {"chat_id": "-1001", "name": "geobot", "creates_join_request": True}) in tg.calls
+    assert users.used_today(7) == 0 and Users(tmp_path / "u.json").data["invite"] == "https://t.me/+abc"
+
+    asyncio.run(bot.handle(_cb(7, "sub")))
+    assert tg.calls[-1][0] == "answerCallbackQuery" and "Заявка пока не пришла" in tg.calls[-1][1]["text"]
+
+    asyncio.run(bot.handle({"update_id": 2, "chat_join_request": {"chat": {"id": -1001}, "from": {"id": 7},
+                                                                   "user_chat_id": 7}}))
+    assert users.joined(7) and "Заявка в канал получена" in tg.calls[-1][1]["text"]
+    asyncio.run(bot.handle({"update_id": 3, "chat_join_request": {"chat": {"id": -999}, "from": {"id": 8}}}))
+    assert not users.joined(8)  # someone else's channel
+    asyncio.run(bot.handle(_photo(7, 4)))
+    assert "sendLocation" in [m for m, _ in tg.calls] and users.free_used(7) == 1
+
+    tg.answers["getChatMember"] = {"status": "member"}  # already in the channel before the bot asked
+    asyncio.run(bot.handle(_text(9, "/stats")))
+    assert users.joined(9) and "Пока нет ни одного фото" in tg.calls[-1][1]["text"]
+    tg.answers["getChatMember"] = RuntimeError("must not be asked")
+    n = len(tg.calls)
+    asyncio.run(bot.handle(_photo(42, 5)))  # the admin is never asked
+    assert "getChatMember" not in [m for m, _ in tg.calls[n:]] and "sendLocation" in [m for m, _ in tg.calls[n:]]
+
+    # the bot is not an admin of the channel yet: nobody is locked out
+    tg2 = ScriptedTG(jpeg_with_gps(), {"createChatInviteLink": RuntimeError("not enough rights")})
+    bot2 = GeoBot(cfg, None, tg=tg2, svc=FakeSvc(), history=History(tmp_path / "h2.json"), users=Users(tmp_path / "u2.json"))
+    asyncio.run(bot2.handle(_photo(7, 1)))
+    assert "sendLocation" in [m for m, _ in tg2.calls]
+
+
+def test_stars_paywall_invoice_payment_and_refund(tmp_path):
+    from geobot.bot import GeoBot
+
+    cfg = Config(bot_token="1:x", public=True, admins={42}, daily_limit=1)
+    tg = ScriptedTG(jpeg_with_gps())
+    users = Users(tmp_path / "u.json")
+    bot = GeoBot(cfg, None, tg=tg, svc=FakeSvc(), history=History(tmp_path / "h.json"), users=users)
+    asyncio.run(bot.handle(_photo(7, 1)))
+    asyncio.run(bot.handle(_photo(7, 2)))
+    wall = tg.calls[-1][1]
+    assert "Бесплатные фото на сегодня закончились" in wall["text"]
+    assert [b[0]["text"] for b in wall["buttons"]] == ["1 фото — 5 ⭐", "10 фото — 25 ⭐", "50 фото — 100 ⭐"]
+
+    asyncio.run(bot.handle(_cb(7, "buy:10")))
+    inv = tg.calls[-1]
+    assert inv[0] == "sendInvoice" and inv[1]["currency"] == "XTR" and inv[1]["prices"] == [{"label": "10 фото", "amount": 25}]
+    assert inv[1]["payload"] == "photos:10:25" and "provider_token" not in inv[1]
+
+    asyncio.run(bot.handle({"update_id": 5, "pre_checkout_query": {"id": "p1", "invoice_payload": "photos:10:25",
+                                                                    "total_amount": 25, "currency": "XTR"}}))
+    assert tg.calls[-1] == ("answerPreCheckoutQuery", {"pre_checkout_query_id": "p1", "ok": True, "error_message": None})
+    asyncio.run(bot.handle({"update_id": 6, "pre_checkout_query": {"id": "p2", "invoice_payload": "photos:50:1",
+                                                                    "total_amount": 1, "currency": "XTR"}}))
+    assert tg.calls[-1][1]["ok"] is False  # a tampered price
+
+    paid = {"message_id": 7, "chat": {"id": 7}, "from": {"id": 7},
+            "successful_payment": {"currency": "XTR", "total_amount": 25, "invoice_payload": "photos:10:25",
+                                   "telegram_payment_charge_id": "ch1"}}
+    asyncio.run(bot.handle({"update_id": 7, "message": paid}))
+    asyncio.run(bot.handle({"update_id": 8, "message": paid}))  # resent by Telegram: counted once
+    assert users.credits(7) == 10 and "+10 фото" in tg.calls[-1][1]["text"]
+
+    asyncio.run(bot.handle(_photo(7, 9)))  # the free photo is used up: a paid one goes
+    assert users.credits(7) == 9 and users.free_used(7) == 1
+
+    class BrokenTG(ScriptedTG):
+        async def download(self, file_id):
+            raise RuntimeError("boom")
+
+    broken = GeoBot(cfg, None, tg=BrokenTG(), svc=FakeSvc(), history=History(tmp_path / "h.json"), users=users)
+    asyncio.run(broken.handle(_photo(7, 10)))
+    assert users.credits(7) == 9  # a failed analysis gives the paid photo back
+
+    busy_ai = GeoBot(cfg, None, tg=tg, svc=FakeSvc(), gemini=FakeGemini(None), history=History(tmp_path / "h.json"),
+                     users=users)
+    asyncio.run(busy_ai.handle(_photo(7, 11)))
+    assert users.credits(7) == 9 and "ИИ сейчас перегружен" in tg.calls[-1][1]["text"]
+
+    asyncio.run(bot.handle(_text(7, "/paysupport")))
+    assert "Вопросы по оплате" in tg.calls[-1][1]["text"]
+    asyncio.run(bot.handle(_text(42, "/admin")))
+    assert "всего 25 (1 покупок)" in tg.calls[-1][1]["text"] and "<code>ch1</code>" in tg.calls[-1][1]["text"]
+    asyncio.run(bot.handle(_text(42, "/refund ch1")))
+    assert ("refundStarPayment", {"user_id": 7, "telegram_payment_charge_id": "ch1"}) in tg.calls
+    assert users.credits(7) == 0 and users.stats()["stars_total"] == 0
+    asyncio.run(bot.handle(_text(42, "/refund ch1")))
+    assert "уже возвращён" in tg.calls[-1][1]["text"]
+
+    off = Config(bot_token="1:x", public=True, daily_limit=1, packs=[])
+    tg3 = ScriptedTG(jpeg_with_gps())
+    bot3 = GeoBot(off, None, tg=tg3, svc=FakeSvc(), history=History(tmp_path / "h3.json"), users=Users(tmp_path / "u3.json"))
+    asyncio.run(bot3.handle(_photo(7, 1)))
+    asyncio.run(bot3.handle(_photo(7, 2)))
+    assert "Лимит 1 фото в день исчерпан" in tg3.calls[-1][1]["text"]
+
+
+def test_packs_from_env_and_paid_photos_jump_the_queue():
+    from geobot.bot import PhotoQueue
+    from geobot.config import _packs
+
+    assert _packs("") == [(1, 5), (10, 25), (50, 100)] and _packs("10:10; 1:2") == [(1, 2), (10, 10)]
+    assert _packs("0") == [] and _packs("off") == []
+
+    async def go():
+        q, order = PhotoQueue(), []
+        await q.acquire(False)  # someone is being analysed
+
+        async def wait(name, paid):
+            await q.acquire(paid)
+            order.append(name)
+            q.release()
+
+        free = asyncio.create_task(wait("free", False))
+        await asyncio.sleep(0)
+        assert q.ahead(True) == 1 and q.ahead(False) == 2
+        paid = asyncio.create_task(wait("paid", True))
+        await asyncio.sleep(0)
+        q.release()
+        await asyncio.gather(free, paid)
+        assert order == ["paid", "free"] and not q.busy
+
+    asyncio.run(go())
