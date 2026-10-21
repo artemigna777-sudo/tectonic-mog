@@ -1,0 +1,7 @@
+welcome/raw.mp4
+welcome/snapshots/
+avatar/snapshots/
+welcome/*.html
+avatar/*.html
+welcome/gsap.min.js
+avatar/gsap.min.js
