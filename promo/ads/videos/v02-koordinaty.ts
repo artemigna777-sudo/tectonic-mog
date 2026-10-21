@@ -11,8 +11,9 @@ import {
   type Line6, type Shot, type Video6,
 } from '../engine6.ts';
 
-const END = 35.8;
-const T = { info: [13.6, 15.9, 18.6], phone: [21.4, 26.0], day: 29.8, cta: 33.0 };
+// Склейки конца — по музыке образцов (112 BPM): затишье 30,25 с, удар дропа 34,03 с, акцент 37,27 с, конец 41,4 с.
+const END = 41.4;
+const T = { info: [13.6, 15.9, 18.6], phone: [21.4, 26.0], night: 30.25, day: 34.03, swell: 34.55, shot: 35.67, cta: 37.27 };
 
 // ─── Комната ──────────────────────────────────────────────────────────────────
 
@@ -187,7 +188,7 @@ const lines: Line6[] = [
   { t: 20.2, text: '«Скинь боту. Он смотрит<br>на вывески, знаки и столбы»' },
   { t: 26.0, text: '«Это же совсем рядом!»' },
   { t: 28.0, text: '«Едем в субботу?»' },
-  { t: T.day, text: '' },
+  { t: T.night, text: '' },
 ];
 
 const cA = (s = 2.05, dy = 120) => ({ fx: A.head.x + 60, fy: A.head.y + dy, s });
@@ -206,10 +207,11 @@ const shots: Shot[] = [
   { t: 20.2, ...cB(), fg: 'L' },
   { t: 26.0, ...cA(2.0), fg: 'R' },
   { t: 28.0, fx: 550, fy: 1060, s: 1.45, ds: 1.08 },
+  { t: T.night, fx: 540, fy: 1000, s: 1.2, ds: 1.14 },
 ];
 const dayShots: Shot[] = [
   { t: T.day, fx: 520, fy: 1180, s: 1.12, ds: 1.05 },
-  { t: 31.0, fx: A2.head.x + 120, fy: A2.head.y + 150, s: 1.6, ds: 1.06 },
+  { t: T.swell, fx: A2.head.x + 120, fy: A2.head.y + 150, s: 1.6, ds: 1.06 },
 ];
 
 const acts = [
@@ -241,17 +243,21 @@ const acts = [
   blinks(A, [1.8, 5.2, 9.7, 11.9, 19.4, 24.8, 27.4]),
   blinks(B, [3.1, 6.8, 10.2, 13.5, 21.0, 28.9]),
   // лампа чуть дышит
-  `tl.to('#lampGlow', { opacity: 0.8, duration: 1.6, ease: 'sine.inOut', yoyo: true, repeat: 9 }, 0);`,
+  `tl.to('#lampGlow', { opacity: 0.8, duration: 1.6, ease: 'sine.inOut', yoyo: true, repeat: 8 }, 0);`,
+  // затишье в музыке: ночь, свет гаснет, оба засыпают, часы перескакивают на утро
+  pose(A, 'R', POSE.rest, T.night + 0.1, 0.6), screen(A, false, T.night + 0.2),
+  `tl.to('#lampGlow', { opacity: 0, duration: 0.8 }, ${T.night + 0.4}); tl.to('#room .cam', { filter: 'brightness(0.55)', duration: 1.2 }, ${T.night + 0.4});`,
+  face(A, 'sleepy', T.night + 0.9), tilt(A, 14, T.night + 0.9, 0.9), face(B, 'sleepy', T.night + 1.3), tilt(B, -14, T.night + 1.3, 0.9),
 ];
 
 const dayActs = [
   pose(A2, 'R', POSE.phone, T.day, 0), pose(A2, 'L', POSE.down, T.day, 0), pose(B2, 'L', POSE.down, T.day, 0), pose(B2, 'R', POSE.down, T.day, 0),
   screen(A2, true, T.day),
-  pose(B2, 'R', POSE.point, 30.3), face(B2, 'grin', 30.3),
-  pose(A2, 'R', [68, -112], 30.9, 0.45), tilt(A2, 6, 30.9), face(A2, 'calm', 31.0),
-  `tl.set('#flash', { opacity: 0.9 }, 31.9); tl.to('#flash', { opacity: 0, duration: 0.35 }, 31.95);`,
-  face(A2, 'happy', 32.1), face(B2, 'happy', 32.1), pose(B2, 'R', POSE.down, 32.2),
-  blinks(A2, [30.5]), blinks(B2, [31.2]),
+  pose(B2, 'R', POSE.point, T.day + 0.15), face(B2, 'grin', T.day + 0.15),
+  pose(A2, 'R', [68, -112], T.swell + 0.2, 0.45), tilt(A2, 6, T.swell + 0.2), face(A2, 'calm', T.swell + 0.3),
+  `tl.set('#flash', { opacity: 0.9 }, ${T.shot}); tl.to('#flash', { opacity: 0, duration: 0.35 }, ${T.shot + 0.05});`,
+  face(A2, 'happy', T.shot + 0.2), face(B2, 'happy', T.shot + 0.2), pose(B2, 'R', POSE.down, T.shot + 0.3), nod(B2, T.shot + 0.5),
+  blinks(A2, [T.day + 0.6]), blinks(B2, [T.swell + 0.4]),
 ];
 
 const infoTweens = [
@@ -277,7 +283,7 @@ const phoneTweens = [
 ];
 
 const ctaGlyph = '<path d="M0,30 C-20,6 -24,-4 -24,-10 A24,24 0 1 1 24,-10 C24,-4 20,6 0,30 Z"/><circle cy="-10" r="8"/>';
-const cap = captions(lines, T.day);
+const cap = captions(lines, T.night);
 
 export const v02: Video6 = {
   id: '02-koordinaty',
@@ -292,6 +298,8 @@ export const v02: Video6 = {
         ${phoneUI}
       </div>
       <div class="clip label6" data-start="0" data-duration="2.4">ПЯТНИЦА · 23:14<b>●</b></div>
+      <div class="clip label6" data-start="${T.night}" data-duration="${(T.day - T.night - 1.9).toFixed(2)}">ПЯТНИЦА · 23:59<b>●</b></div>
+      <div class="clip label6" data-start="${(T.day - 1.9).toFixed(2)}" data-duration="1.9">СУББОТА · 05:30<b>●</b></div>
       ${cap.html}
       <div class="clip scene" id="day" data-start="${T.day}" data-duration="${(T.cta - T.day).toFixed(2)}">
         <div class="cam" id="cam2">${svg6(day)}</div>

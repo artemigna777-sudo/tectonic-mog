@@ -161,7 +161,7 @@ export const nod = (f: Fig, t: number, n = 2) =>
 export const blinks = (f: Fig, times: number[]) =>
   times
     .map((t) => {
-      const [x, y] = [f.head.x, f.head.y - 6];
+      const [x, y] = [0, -6]; // глаза — внутри группы головы, её начало координат — центр головы
       return `tl.to('#${f.id}_eyes', { scaleY: 0.12, svgOrigin: '${x} ${y}', duration: 0.06 }, ${t.toFixed(3)}); tl.to('#${f.id}_eyes', { scaleY: 1, svgOrigin: '${x} ${y}', duration: 0.08 }, ${(t + 0.09).toFixed(3)});`;
     })
     .join('\n      ');
