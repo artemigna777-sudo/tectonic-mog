@@ -927,3 +927,35 @@ def test_menu_keyboard_buttons(tmp_path):
     asyncio.run(real.send(1, "hi", keyboard=[["a", "b"]]))
     assert seen.payload["reply_markup"]["keyboard"] == [[{"text": "a"}, {"text": "b"}]]
     assert seen.payload["reply_markup"]["is_persistent"] and seen.payload["reply_markup"]["resize_keyboard"]
+
+
+def test_owner_reminders_renew_and_video(tmp_path):
+    from datetime import datetime
+
+    from geobot.bot import GeoBot
+    from geobot.users import MSK
+
+    cfg = Config(bot_token="1:x", public=True, admins={42}, renew_days=3, video_time="10:30")
+    tg = ScriptedTG()
+    users = Users(tmp_path / "u.json")
+    bot = GeoBot(cfg, None, tg=tg, svc=FakeSvc(), history=History(tmp_path / "h.json"), users=users)
+    t0 = datetime(2026, 10, 24, 9, 0, tzinfo=MSK).timestamp()
+    users.data["reminders"] = {"renew_at": t0 + 3 * 86400}
+
+    asyncio.run(bot.check_reminders(t0))
+    assert not tg.calls  # nothing due yet
+    asyncio.run(bot.check_reminders(t0 + 1.6 * 3600))  # 10:36 — video time
+    assert tg.calls[-1][1]["chat_id"] == 42 and "выложить видео" in tg.calls[-1][1]["text"]
+    n = len(tg.calls)
+    asyncio.run(bot.check_reminders(t0 + 2 * 3600))  # once a day
+    assert len(tg.calls) == n
+
+    asyncio.run(bot.check_reminders(t0 + 3 * 86400 + 60))
+    renew = [c for c in tg.calls if "продлить сервер" in c[1].get("text", "")]
+    assert len(renew) == 1 and renew[0][1]["buttons"][1][0]["callback_data"] == "renewed"
+    assert users.data["reminders"]["renew_at"] == t0 + 3 * 86400 + 60 + 12 * 3600  # nag again in 12 h
+
+    cb = {"update_id": 9, "callback_query": {"id": "q", "data": "renewed", "from": {"id": 42},
+                                             "message": {"chat": {"id": 42}, "message_id": 5}}}
+    asyncio.run(bot.handle(cb))
+    assert users.data["reminders"]["renew_at"] > time.time() + 2.9 * 86400 and "Сервер продлён" in tg.calls[-1][1]["text"]

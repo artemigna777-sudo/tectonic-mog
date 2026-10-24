@@ -77,6 +77,9 @@ class Config:
     channel_id: str = ""  # users must ask to join this channel first (-100… or @name); empty — off
     channel_link: str = ""  # invite link with join requests; empty — the bot creates one itself
     support: str = ""  # who answers /paysupport, e.g. @username
+    renew_days: float = 3  # remind admins to renew the free server this often (Bot-Hosting stops it after 4 days); 0 — off
+    panel_url: str = "https://bot-hosting.net/panel"
+    video_time: str = "10:30"  # daily «post a TikTok» reminder to admins, Moscow time; empty — off
     users_file: str = "geobot_users.json"
     queue_limit: int = 20  # photos waiting at once; more and new ones are turned away
 
@@ -105,6 +108,9 @@ class Config:
             channel_id=os.environ.get("CHANNEL_ID", "").strip(),
             channel_link=os.environ.get("CHANNEL_LINK", "").strip(),
             support=os.environ.get("SUPPORT", "").strip(),
+            renew_days=float(os.environ.get("RENEW_DAYS", "3").strip() or 0),
+            panel_url=os.environ.get("PANEL_URL", "").strip() or "https://bot-hosting.net/panel",
+            video_time=os.environ.get("VIDEO_REMINDER", "10:30").strip(),
             users_file=os.environ.get("USERS_FILE", "").strip() or "geobot_users.json",
             queue_limit=_int(os.environ.get("QUEUE_LIMIT", ""), 20),
             ocr_space_key=os.environ.get("OCR_SPACE_KEY", "").strip(),

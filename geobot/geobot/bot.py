@@ -3,6 +3,8 @@
 import asyncio
 import logging
 import re
+import time
+from datetime import datetime
 from collections import OrderedDict
 from html import escape
 
@@ -16,7 +18,7 @@ from .history import History
 from .report import dossier, summary
 from .services import Services
 from .telegram import Telegram
-from .users import Users
+from .users import MSK, Users
 
 log = logging.getLogger(__name__)
 MAX_FILE = 20 * 1024 * 1024  # Bot API download limit
@@ -145,6 +147,7 @@ class GeoBot:
                         "until then the subscription check is off", self.cfg.channel_id)
         if self.cfg.public and not self.cfg.admins:
             log.warning("public mode without ADMIN_USERS: nobody can /ban, and your own photos count against the limit")
+        self.start_reminders()
         offset = 0
         while True:
             try:
@@ -241,6 +244,52 @@ class GeoBot:
             lines.append(f"Куплено фото: {self.users.credits(uid)} (не сгорают)")
         await self.tg.send(chat, "\n".join(lines),
                            [[{"text": "⭐ Купить ещё", "callback_data": "shop"}]] if self.cfg.packs else None)
+
+    # ─── Reminders for the owner ─────────────────────────────────────────────
+
+    def start_reminders(self) -> None:
+        r = self.users.data.setdefault("reminders", {})
+        # the bot was (re)started — most likely right after the owner touched the panel: count from now
+        r["renew_at"] = time.time() + self.cfg.renew_days * 86400
+        self.users._save()
+        task = asyncio.create_task(self.reminder_loop())
+        self.tasks.add(task)
+
+    async def reminder_loop(self) -> None:
+        while True:
+            try:
+                await self.check_reminders(time.time())
+            except Exception:
+                log.exception("reminder failed")
+            await asyncio.sleep(300)
+
+    async def _to_admins(self, text: str, buttons: list[list[dict]]) -> None:
+        for uid in self.cfg.admins:
+            try:
+                await self.tg.send(uid, text, buttons)
+            except Exception as e:  # the admin never started the bot
+                log.warning("cannot remind %s: %s", uid, e)
+
+    async def check_reminders(self, now: float) -> None:
+        r = self.users.data.setdefault("reminders", {})
+        if self.cfg.renew_days and now >= r.get("renew_at", now + 1):
+            r["renew_at"] = now + 12 * 3600  # until «Продлил» is pressed, again in 12 hours
+            self.users._save()
+            await self._to_admins("⏰ <b>Пора продлить сервер бота</b>\nБесплатный сервер на Bot-Hosting останавливается "
+                                  "через 4 дня без продления. Зайдите в панель и нажмите Renew.",
+                                  [[{"text": "🔗 Открыть панель", "url": self.cfg.panel_url}],
+                                   [{"text": "✅ Продлил", "callback_data": "renewed"}]])
+        hm = self.cfg.video_time.split(":")
+        if len(hm) == 2 and all(x.isdigit() for x in hm):
+            msk = datetime.fromtimestamp(now, MSK)
+            due = msk.replace(hour=int(hm[0]), minute=int(hm[1]), second=0, microsecond=0)
+            day = msk.strftime("%Y-%m-%d")
+            if msk >= due and (msk - due).total_seconds() < 3 * 3600 and r.get("video_day") != day:
+                r["video_day"] = day
+                self.users._save()
+                await self._to_admins("🎬 <b>Время выложить видео в TikTok</b>\nЛучшее время — сейчас, с 10 до 11. "
+                                      "Не забудьте ссылку на бота в био.",
+                                      [[{"text": "✅ Выложил", "callback_data": "posted"}]])
 
     def _left(self, uid: int) -> int:
         return max(0, self.cfg.daily_limit - self.users.free_used(uid))
@@ -592,6 +641,14 @@ class GeoBot:
                                           keyboard=self.menu(uid in self.cfg.admins))
             return await self.tg.call("answerCallbackQuery", callback_query_id=cb["id"], show_alert=True,
                                       text="Заявка пока не пришла. Нажмите «Подписаться на канал» и отправьте заявку.")
+        if data in ("renewed", "posted") and uid in self.cfg.admins:
+            if data == "renewed":
+                self.users.data.setdefault("reminders", {})["renew_at"] = time.time() + self.cfg.renew_days * 86400
+                self.users._save()
+            await self.tg.call("answerCallbackQuery", callback_query_id=cb["id"],
+                               text="Отлично! Напомню через 3 дня." if data == "renewed" else "Отлично! До завтра 🙂")
+            return await self.tg.edit(chat, cb["message"]["message_id"],
+                                      "✅ Сервер продлён." if data == "renewed" else "✅ Видео выложено.")
         if data == "shop":
             await self.tg.call("answerCallbackQuery", callback_query_id=cb["id"])
             return await self.send_shop(chat, uid)
