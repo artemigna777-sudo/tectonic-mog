@@ -52,8 +52,14 @@ add(t["slideA"] - 0.02, noise(0.4, 400, 5000, sweep), 0.55, 0.1)
 add(t["result"], tone(1046, 0.5, 9) + 0.6 * tone(1568, 0.5, 11) + 0.4 * tone(2093, 0.5, 13), 0.5)
 add(t["notice"], tone(70, 0.5, 9, 40) + 0.5 * noise(0.5, 60, 600, lambda e: np.exp(-14 * e)), 1.1)
 add(t["endtext2"], tone(220, 0.25, 12, 330), 0.25)
-add(t["cta"], tone(110, 0.6, 7, 55) + 0.4 * tone(880, 0.6, 10), 0.8)
+add(t["cta"], tone(110, 0.6, 7, 55) + 0.4 * tone(880, 0.6, 10), 0.8)  # удар на «Бот в био»
 
+# Музыка обрывается перед заставкой TikTok образца (её джингл начинается на 17,23 с): конец — свой аккорд и удар
+cut = int(T["musicEnd"] * SR)
+mus[cut:] = 0
+mus[cut - int(0.12 * SR):cut] *= np.linspace(1, 0, int(0.12 * SR))[:, None]
+chord = sum(tone(f, 1.4, 3.2) for f in (440, 554.4, 659.3, 880)) / 4
+add(t["cta"], chord, 0.55)
 mix = mus * 0.95 + sfx * 0.6
 fade = np.minimum(1, (END - np.arange(n) / SR) / 0.4)[:, None]
 mix = np.clip(mix * fade, -1, 1)
