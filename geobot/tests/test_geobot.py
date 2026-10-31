@@ -959,3 +959,24 @@ def test_owner_reminders_renew_and_video(tmp_path):
                                              "message": {"chat": {"id": 42}, "message_id": 5}}}
     asyncio.run(bot.handle(cb))
     assert users.data["reminders"]["renew_at"] > time.time() + 2.9 * 86400 and "Сервер продлён" in tg.calls[-1][1]["text"]
+
+
+def test_deepseek_is_the_next_fallback_after_kimi():
+    answer = '{"candidates": [{"region": "Минск", "country": "Беларусь", "probability": 80}], "confidence": "low"}'
+    http = FallbackHTTP({
+        "m1": [(429, {"error": {"message": "quota", "details": [{"violations": [{"quotaId": "PerDay"}]}]}})] * 3,
+        "fallback": [(429, {"error": {"code": 429, "message": "free-models-per-day"}}),   # Kimi is out for today
+                     (200, {"choices": [{"message": {"content": answer}}]}),              # DeepSeek answers
+                     (402, {"error": {"message": "Insufficient Balance"}})],              # and then runs out of money
+    })
+    from geobot.gemini import Fallback
+
+    gem = Gemini(http, "k", ["m1"], ["lite"], fallback_key="sk-or-x", extra=[Fallback("sk-ds", "deepseek-flash", "https://api.deepseek.com/chat/completions", "DEEPSEEK_MODEL")])
+    g = asyncio.run(gem.analyze(plain_jpeg(), [], "нет"))
+    assert g["model"] == "deepseek-flash" and g["region"] == "Минск"
+    assert gem.blocked["moonshotai/kimi-k2.6:free"] > time.time() + 60 and gem.used["deepseek-flash"] == 1
+    assert [c[1] for c in http.calls if c[0] == "fallback"] == ["moonshotai/kimi-k2.6:free", "deepseek-flash"]
+    # next photo: Kimi is skipped (blocked), DeepSeek has no money
+    assert asyncio.run(gem.analyze(plain_jpeg(), [], "нет")) is None
+    assert "на балансе нет денег" in gem.last_error and gem.blocked["deepseek-flash"] > time.time() + 3000
+    assert Config(bot_token="1:x", deepseek_key="k").gemini_enabled

@@ -13,7 +13,7 @@ import aiohttp
 from .analyze import analyze
 from .config import Config
 from .gazetteer import Gazetteer
-from .gemini import Gemini
+from .gemini import Fallback, Gemini
 from .history import History
 from .report import dossier, summary
 from .services import Services
@@ -107,7 +107,8 @@ class GeoBot:
         self.svc = svc or Services(http, cfg.contact, cfg.ocr_space_key, cfg.ocr_language)
         self.gemini = gemini if gemini is not None else (
             Gemini(http, cfg.gemini_api_key, cfg.gemini_models, cfg.gemini_lite_models, cfg.gemini_search,
-                   cfg.fallback_key, cfg.fallback_model, cfg.fallback_url)
+                   cfg.fallback_key, cfg.fallback_model, cfg.fallback_url,
+                   [Fallback(cfg.deepseek_key, cfg.deepseek_model, cfg.deepseek_url, "DEEPSEEK_MODEL")])
             if cfg.gemini_enabled else None)
         self.history = history or History(cfg.history_file)
         self.users = users or Users(cfg.users_file)
@@ -141,7 +142,8 @@ class GeoBot:
         log.info("bot started; allowed users: %s; admins: %s; daily limit: %s; gemini: %s; fallback: %s", who,
                  sorted(self.cfg.admins) or "none", self.cfg.daily_limit or "off",
                  ", ".join(self.cfg.gemini_models) if self.cfg.gemini_api_key else "off",
-                 self.cfg.fallback_model if self.cfg.fallback_key else "off")
+                 ", ".join(m for m, k in ((self.cfg.fallback_model, self.cfg.fallback_key),
+                                          (self.cfg.deepseek_model, self.cfg.deepseek_key)) if k) or "off")
         if self.cfg.channel_id and not await self.invite_link():
             log.warning("channel %s: no invite link — make the bot an admin with 'Invite users'; "
                         "until then the subscription check is off", self.cfg.channel_id)

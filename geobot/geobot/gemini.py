@@ -16,6 +16,7 @@ import logging
 import re
 import time
 from collections import Counter
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -27,6 +28,18 @@ log = logging.getLogger(__name__)
 ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 FALLBACK_URL = "https://openrouter.ai/api/v1/chat/completions"
 FALLBACK_MODEL = "moonshotai/kimi-k2.6:free"
+DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
+DEEPSEEK_MODEL = "deepseek-flash"
+
+
+@dataclass(frozen=True)
+class Fallback:
+    """A vision model behind an OpenAI-compatible API (OpenRouter, DeepSeek, xAI…)."""
+
+    key: str
+    model: str
+    url: str
+    name: str = "FALLBACK_MODEL"  # which setting to blame when the model is not found
 META = (Path(__file__).parent / "data" / "meta_ru.md").read_text(encoding="utf-8") + cheat_sheet()
 
 LOCATE_PROMPT = """Найди на фото до 4 небольших участков с деталями, полезными для определения места съёмки:
@@ -129,9 +142,11 @@ def model_name(model: str | None) -> str:
 class Gemini:
     def __init__(self, session: aiohttp.ClientSession, api_key: str, models: list[str], lite_models: list[str],
                  search: bool = False, fallback_key: str = "", fallback_model: str = FALLBACK_MODEL,
-                 fallback_url: str = FALLBACK_URL):
+                 fallback_url: str = FALLBACK_URL, extra: list[Fallback] | None = None):
         self.http = session
-        self.fallback_key, self.fallback_model, self.fallback_url = fallback_key, fallback_model, fallback_url
+        # tried in this order after Gemini: the first fallback, then the extra ones (DeepSeek…)
+        self.fallbacks: list[Fallback] = ([Fallback(fallback_key, fallback_model, fallback_url)] if fallback_key else []) \
+            + [f for f in (extra or []) if f.key]
         self.used: Counter = Counter()  # answers per model since start, for /admin
         self.key = api_key
         self.models = models
@@ -212,47 +227,52 @@ class Gemini:
                 log.warning("gemini %s HTTP %s: %s", model, status, msg[:300])
                 break
         # the fallback only does the final analysis: its free quota is small, and boxes are a Gemini format
-        if not lite and self.fallback_key and self.blocked.get(self.fallback_model, 0) <= time.time():
-            parsed, err = await self._fallback(plain)
+        for fb in ([] if lite else self.fallbacks):
+            if self.blocked.get(fb.model, 0) > time.time():
+                continue
+            parsed, err = await self._fallback(plain, fb)
             if parsed is not None:
-                self.used[self.fallback_model] += 1
-                return parsed, {"model": self.fallback_model, "sources": []}
-            errors.append(f"{self.fallback_model} — {err}")
+                self.used[fb.model] += 1
+                return parsed, {"model": fb.model, "sources": []}
+            errors.append(f"{fb.model} — {err}")
         if errors:
             self.last_error = "; ".join(errors)
         return None, {}
 
-    async def _fallback(self, parts: list[dict]) -> tuple[object, str]:
-        body = {"model": self.fallback_model, "temperature": 0.2,
+    async def _fallback(self, parts: list[dict], fb: Fallback) -> tuple[object, str]:
+        body = {"model": fb.model, "temperature": 0.2,
                 "messages": [{"role": "user", "content": _openai_content(parts)}]}
-        headers = {"Authorization": f"Bearer {self.fallback_key}", "X-Title": "geobot"}
+        headers = {"Authorization": f"Bearer {fb.key}", "X-Title": "geobot"}
         try:
-            async with self.http.post(self.fallback_url, json=body, headers=headers,
+            async with self.http.post(fb.url, json=body, headers=headers,
                                       timeout=aiohttp.ClientTimeout(total=180)) as r:
                 status, data = r.status, await r.json(content_type=None)
         except Exception as e:
-            log.warning("fallback %s failed: %s", self.fallback_model, e)
+            log.warning("fallback %s failed: %s", fb.model, e)
             return None, "нет связи"
         err = (data.get("error") or {}) if isinstance(data, dict) else {}
         if status == 200 and not err:
             try:
                 parsed = parse_json(data["choices"][0]["message"]["content"] or "")
             except (KeyError, IndexError, TypeError, ValueError) as e:
-                log.warning("fallback %s bad response: %s", self.fallback_model, e)
+                log.warning("fallback %s bad response: %s", fb.model, e)
                 parsed = None
             return parsed, "непонятный ответ"
         msg = str(err.get("message", "") if isinstance(err, dict) else err)
         code = err.get("code", status) if isinstance(err, dict) else status
-        log.warning("fallback %s HTTP %s: %s", self.fallback_model, code, msg[:300])
+        log.warning("fallback %s HTTP %s: %s", fb.model, code, msg[:300])
         if code == 429 or status == 429:
             daily = "per-day" in msg.lower() or "per day" in msg.lower()
-            self.blocked[self.fallback_model] = _next_utc_midnight() if daily else time.time() + 65
+            self.blocked[fb.model] = _next_utc_midnight() if daily else time.time() + 65
             return None, "дневной лимит" if daily else "лимит запросов, модель перегружена"
+        if status == 402:  # DeepSeek: no money on the balance
+            self.blocked[fb.model] = time.time() + 3600
+            return None, "на балансе нет денег — пополните счёт"
         if status in (401, 403):
             return None, "ключ не подходит"
-        if status == 404:
-            self.blocked[self.fallback_model] = time.time() + 24 * 3600
-            return None, "модель не найдена — проверьте FALLBACK_MODEL"
+        if status == 404 or (status == 400 and "model" in msg.lower()):
+            self.blocked[fb.model] = time.time() + 24 * 3600
+            return None, f"модель не найдена — проверьте {fb.name}"
         return None, f"HTTP {status}: {msg[:100]}"
 
     async def locate_details(self, jpeg: bytes) -> list[dict]:

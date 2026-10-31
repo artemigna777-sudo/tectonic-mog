@@ -67,6 +67,9 @@ class Config:
     fallback_key: str = ""  # OpenAI-compatible API used when Gemini's daily quota is out (OpenRouter by default)
     fallback_model: str = "moonshotai/kimi-k2.6:free"
     fallback_url: str = "https://openrouter.ai/api/v1/chat/completions"
+    deepseek_key: str = ""  # DeepSeek's own API, tried after the first fallback
+    deepseek_model: str = "deepseek-flash"
+    deepseek_url: str = "https://api.deepseek.com/chat/completions"
     contact: str = "geobot"
     history_file: str = "geobot_history.json"
     history_hint: bool = True  # tell Gemini where this user's earlier photos turned out to be
@@ -88,7 +91,7 @@ class Config:
 
     @property
     def gemini_enabled(self) -> bool:
-        return bool(self.gemini_api_key or self.fallback_key)
+        return bool(self.gemini_api_key or self.fallback_key or self.deepseek_key)
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -124,6 +127,9 @@ class Config:
             fallback_key=os.environ.get("FALLBACK_KEY", "").strip(),
             fallback_model=os.environ.get("FALLBACK_MODEL", "").strip() or "moonshotai/kimi-k2.6:free",
             fallback_url=os.environ.get("FALLBACK_URL", "").strip() or "https://openrouter.ai/api/v1/chat/completions",
+            deepseek_key=os.environ.get("DEEPSEEK_API_KEY", "").strip(),
+            deepseek_model=os.environ.get("DEEPSEEK_MODEL", "").strip() or "deepseek-flash",
+            deepseek_url=os.environ.get("DEEPSEEK_URL", "").strip() or "https://api.deepseek.com/chat/completions",
             contact=os.environ.get("CONTACT", "geobot").strip() or "geobot",
             history_file=os.environ.get("HISTORY_FILE", "").strip() or "geobot_history.json",
             history_hint=os.environ.get("HISTORY_HINT", "1").strip().lower() not in ("0", "no", "off", "false"),
