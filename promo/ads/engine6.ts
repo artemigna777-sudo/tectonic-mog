@@ -50,6 +50,11 @@ export interface FigOpts {
   phone?: Side;
   /** Поворот телефона в кисти (чтобы в позе «смотрит в телефон» он стоял ровно). */
   phoneRot?: number;
+  /** Объёмная рисовка: одежда, руки-трубки, кисти, кроссовки, тень, блик на голове. */
+  rich?: boolean;
+  /** Цвет одежды и акцент (полоска на худи) для rich. */
+  outfit?: string;
+  accent?: string;
 }
 
 const UP = 85; // плечо → локоть
@@ -100,6 +105,7 @@ export function figure(o: FigOpts): Fig {
   const faceGroups = FACE_KEYS.map(
     (k) => `<g id="${o.id}_face_${k}" class="${o.id}_face" stroke-width="4" opacity="${k === (o.face ?? 'neutral') ? 1 : 0}">${set[k]}</g>`,
   ).join('');
+  if (o.rich) return richFigure(o, { x, hipY, neckY, headY, sy, sh, el, faceGroups, sit });
   const svg = `<g id="${o.id}">
     ${legs}<path d="M${x},${hipY} L${x},${neckY}"/>
     ${arm('L')}${arm('R')}
@@ -108,6 +114,66 @@ export function figure(o: FigOpts): Fig {
       <circle r="56" fill="#000"/>${hairSvg(o.hair)}
       <g id="${o.id}_eyes">${faceGroups}</g>
     </g></g>
+  </g>`;
+  return { svg, id: o.id, head: { x, y: headY }, sh, el, neck: [x, neckY] };
+}
+
+interface RichCtx {
+  x: number; hipY: number; neckY: number; headY: number; sy: number;
+  sh: Record<Side, [number, number]>; el: Record<Side, [number, number]>; faceGroups: string; sit: boolean;
+}
+
+/** Объёмный человечек: белый контур, тёмная одежда с акцентом, руки и ноги — «трубки» с контуром. */
+function richFigure(o: FigOpts, c: RichCtx): Fig {
+  const { x, hipY, neckY, headY, sh, el, faceGroups, sit } = c;
+  const cloth = o.outfit ?? '#1b2638';
+  const acc = o.accent ?? C6.accent;
+  const hairFill = '#0a0d13';
+  const tube = (d: string, wo: number, wi: number, inner: string) =>
+    `<path d="${d}" stroke="${C6.line}" stroke-width="${wo}"/><path d="${d}" stroke="${inner}" stroke-width="${wi}"/>`;
+  const shoe = (px: number, dir: number) => `<path d="M${px - 14 * dir},${o.floor - 14} q${14 * dir},-8 ${40 * dir},-2 q${10 * dir},6 ${8 * dir},16 H${px - 16 * dir} Z" fill="#f4f4f2" stroke="#0a0d13" stroke-width="3"/><path d="M${px - 14 * dir},${o.floor - 3} H${px + 32 * dir}" stroke="${acc}" stroke-width="5"/>`;
+  const legPaths = sit
+    ? [`M${x - 8},${hipY + 4} L${x - 58},${hipY + 26} L${x - 62},${o.floor - 14}`, `M${x + 8},${hipY + 4} L${x + 58},${hipY + 26} L${x + 62},${o.floor - 14}`]
+    : [`M${x - 8},${hipY} L${x - 26},${o.floor - 14}`, `M${x + 8},${hipY} L${x + 26},${o.floor - 14}`];
+  const legs = legPaths.map((d) => tube(d, 30, 22, '#121a28')).join('') + (sit ? shoe(x - 62, -1) + shoe(x + 62, 1) : shoe(x - 26, -1) + shoe(x + 26, 1));
+  const torso = `M${x - 40},${neckY + 10} Q${x},${neckY - 6} ${x + 40},${neckY + 10} L${x + 30},${hipY + 8} Q${x},${hipY + 22} ${x - 30},${hipY + 8} Z`;
+  const body = `<path d="${torso}" fill="${cloth}" stroke="${C6.line}" stroke-width="6"/>
+    <path d="M${x - 33},${neckY + 70} H${x + 33}" stroke="${acc}" stroke-width="7"/>
+    <path d="M${x - 14},${neckY + 8} L${x},${neckY + 46} L${x + 14},${neckY + 8}" stroke="${C6.line}" stroke-width="4" fill="none" opacity="0.55"/>
+    <path d="M${x - 22},${hipY - 52} q22,22 44,0" stroke="${C6.line}" stroke-width="3.5" fill="none" opacity="0.45"/>`;
+  const arm = (s: Side) => {
+    const [sx, syy] = sh[s];
+    const [ex, ey] = el[s];
+    const phone =
+      o.phone === s
+        ? `<g transform="translate(${ex} ${ey + FORE}) rotate(${o.phoneRot ?? 0})">
+            <ellipse id="${o.id}_glow" cx="0" cy="0" rx="76" ry="76" fill="url(#phoneGlow)" stroke="none" opacity="0"/>
+            <rect x="-18" y="-33" width="36" height="66" rx="8" fill="#05070b" stroke="${C6.line}" stroke-width="4"/>
+            <rect id="${o.id}_scr" x="-12" y="-25" width="24" height="48" rx="4" fill="${C6.screen}" stroke="none" opacity="0.15"/>
+          </g>`
+        : '';
+    return `<g id="${o.id}_a${s}">${tube(`M${sx},${syy} L${ex},${ey}`, 22, 14, cloth)}<g id="${o.id}_f${s}">${tube(`M${ex},${ey} L${ex},${ey + FORE - 8}`, 20, 12, cloth)}
+      <circle cx="${ex}" cy="${ey + FORE}" r="13" fill="#f2d3b8" stroke="${C6.line}" stroke-width="4"/>${phone}</g></g>`;
+  };
+  const hair: Record<string, string> = {
+    spiky: `<path d="M-46,-26 L-50,-70 L-26,-46 L-14,-82 L4,-48 L24,-80 L34,-44 L58,-62 L50,-24 Q0,-52 -46,-26Z" fill="${hairFill}" stroke="${C6.line}" stroke-width="5"/>`,
+    long: `<path d="M-58,10 Q-64,-70 0,-72 Q64,-70 58,10 Q66,60 46,90 L34,50 Q40,-30 0,-34 Q-40,-30 -34,50 L-46,90 Q-66,60 -58,10Z" fill="${hairFill}" stroke="${C6.line}" stroke-width="5"/><path d="M-26,-56 Q-4,-64 22,-54" stroke="${C6.line}" stroke-width="3" opacity="0.6" fill="none"/>`,
+    cap: `<path d="M-56,-14 Q-54,-72 0,-74 Q54,-72 56,-14 Q0,-34 -56,-14Z" fill="${acc}" stroke="${C6.line}" stroke-width="5"/><path d="M40,-20 L96,-10 Q90,0 44,-4Z" fill="${acc}" stroke="${C6.line}" stroke-width="5"/>`,
+    curly: `<path d="M-52,-20 q-14,-26 10,-40 q-4,-24 26,-26 q14,-20 36,-6 q28,-2 30,24 q20,14 6,38 q-30,-22 -54,-22 q-30,2 -54,32Z" fill="${hairFill}" stroke="${C6.line}" stroke-width="5"/>`,
+  };
+  const head = `<g id="${o.id}_head"><g transform="translate(${x} ${headY})">
+      <ellipse id="${o.id}_light" cx="0" cy="10" rx="96" ry="86" fill="url(#faceLight)" stroke="none" opacity="0"/>
+      <circle cx="-56" cy="6" r="11" fill="#f2d3b8" stroke="${C6.line}" stroke-width="4"/><circle cx="56" cy="6" r="11" fill="#f2d3b8" stroke="${C6.line}" stroke-width="4"/>
+      <circle r="58" fill="#0a0d13"/>
+      <path d="M-44,-36 A58,58 0 0 1 20,-54" stroke="${C6.line}" stroke-width="4" opacity="0.28" fill="none"/>
+      ${hair[o.hair ?? ''] ?? ''}
+      <g id="${o.id}_eyes">${faceGroups}</g>
+    </g></g>`;
+  const svg = `<g id="${o.id}">
+    <ellipse cx="${x}" cy="${o.floor + 4}" rx="86" ry="12" fill="#000" opacity="0.55" stroke="none"/>
+    ${legs}${body}${arm('L')}${arm('R')}
+    <path d="M${x - 10},${neckY - 4} v18 M${x + 10},${neckY - 4} v18" stroke="#f2d3b8" stroke-width="5"/>
+    ${head}
   </g>`;
   return { svg, id: o.id, head: { x, y: headY }, sh, el, neck: [x, neckY] };
 }
